@@ -1,0 +1,65 @@
+Total samples: 842424
+Num labels: 1406
+Final sample: (100000, 4)
+
+Using device: cuda
+=======================================================
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Classes: 1406  |  Samples: 100000
+tokenizer_config.json: 100%
+ 48.0/48.0 [00:00<00:00, 5.48kB/s]
+vocab.txt: 
+ 232k/? [00:00<00:00, 15.8MB/s]
+tokenizer.json: 
+ 466k/? [00:00<00:00, 29.1MB/s]
+
+── ToMe OFF ──────────────────────────────────────────
+config.json: 100%
+ 570/570 [00:00<00:00, 53.5kB/s]
+model.safetensors: 100%
+ 440M/440M [00:02<00:00, 242MB/s]
+Loading weights: 100%
+ 199/199 [00:00<00:00, 895.87it/s, Materializing param=pooler.dense.weight]
+BertModel LOAD REPORT from: bert-base-uncased
+Notes:
+- UNEXPECTED	:can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+[ToMe OFF] Standard BERT (no merging)
+  Epoch 1/3  loss=5.7816  time=2217.43s
+  Epoch 2/3  loss=4.1519  time=2224.90s
+  Epoch 3/3  loss=3.3181  time=2224.49s
+  Accuracy : 0.3020
+  Avg batch inference: 7.72 ms
+  Peak GPU memory: 2244.3 MB
+  Total training time: 6666.82s
+
+── ToMe ON  ──────────────────────────────────────────
+Loading weights: 100%
+ 199/199 [00:00<00:00, 884.94it/s, Materializing param=pooler.dense.weight]
+BertModel LOAD REPORT from: bert-base-uncased
+Notes:
+- UNEXPECTED	:can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+[ToMe ON]  Merging 8 token pairs per layer
+  Epoch 1/3  loss=6.0364  time=1621.91s
+  Epoch 2/3  loss=4.5545  time=1621.68s
+  Epoch 3/3  loss=3.7515  time=1621.31s
+  Accuracy : 0.2531
+  Avg batch inference: 23.38 ms
+  Peak GPU memory: 2249.1 MB
+  Total training time: 4864.90s
+
+=======================================================
+  COMPARISON SUMMARY
+=======================================================
+Metric                         Baseline       ToMe
+-------------------------------------------------------
+Accuracy                         0.3020     0.2531
+Avg Inference (ms)                 7.72      23.38
+Peak GPU Memory (MB)             2244.3     2249.1
+-------------------------------------------------------
+  Speed-up factor   : 0.33×
+  Accuracy Δ        : -4.89%
+=======================================================
+
+=======================================================
+  TOTAL SCRIPT EXECUTION TIME: 11894.42s (198.24 min)
+=======================================================

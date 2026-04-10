@@ -1,0 +1,102 @@
+(venv) PS C:\Users\Admin\Downloads\tome> py C
+
+Using device: cuda
+=============================================
+Classes: 264  |  Samples: 3300
+| UNEXPECTED |  |
+cls.predictions.transform.LayerNorm.weight | UNEXPECTED |  |
+cls.seq_relationship.weight                | UNEXPECTED |  |
+
+Notes:
+- UNEXPECTED:   can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+[ToMe OFF] Standard BERT (no merging)
+  Epoch 1/10  loss=1.7666  time=59.12s  val_acc=0.6385 ✓
+  Epoch 2/10  loss=0.9124  time=52.79s  val_acc=0.7612 ✓
+  Epoch 3/10  loss=0.5444  time=52.99s  val_acc=0.7662 ✓
+  Epoch 4/10  loss=0.3441  time=53.11s  val_acc=0.7612 (patience: 1/3)
+  Epoch 5/10  loss=0.2318  time=53.13s  val_acc=0.7595 (patience: 2/3)
+  Epoch 6/10  loss=0.1278  time=53.20s  val_acc=0.7695 ✓
+  Epoch 7/10  loss=0.0742  time=53.19s  val_acc=0.7993 ✓
+  Epoch 8/10  loss=0.0510  time=53.20s  val_acc=0.7811 (patience: 1/3)
+  Epoch 9/10  loss=0.0446  time=53.22s  val_acc=0.7861 (patience: 2/3)
+  Epoch 10/10  loss=0.0453  time=53.23s  val_acc=0.7778 (patience: 3/3)
+  Early stopping at epoch 10 (best epoch: 7)
+
+  Test Results:
+    Top-1  Accuracy: 0.7566
+    Top-3  Accuracy: 0.9503
+    Top-5  Accuracy: 0.9752
+    Top-10 Accuracy: 0.9917
+    Avg batch inference: 6.62 ms
+    Peak GPU memory: 2241.0 MB
+    Total training time: 537.17s
+    Epochs trained: 10/10
+
+── ToMe ON  ──────────────────────────────────────────
+Loading weights: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 199/199 [00:00<00:00, 3591.34it/s]
+BertModel LOAD REPORT from: bert-base-uncased
+Key                                        | Status     |  |
+-------------------------------------------+------------+--+-
+cls.predictions.transform.LayerNorm.bias   | UNEXPECTED |  |
+cls.predictions.bias                       | UNEXPECTED |  |
+cls.seq_relationship.bias                  | UNEXPECTED |  |
+cls.predictions.transform.dense.weight     | UNEXPECTED |  |
+cls.predictions.transform.dense.bias       | UNEXPECTED |  |
+cls.predictions.transform.LayerNorm.weight | UNEXPECTED |  |
+cls.seq_relationship.weight                | UNEXPECTED |  |
+
+Notes:
+- UNEXPECTED:   can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+[ToMe ON]  Merging 8 token pairs per layer
+  Epoch 1/10  loss=1.9498  time=42.35s  val_acc=0.6169 ✓
+  Epoch 2/10  loss=1.1438  time=42.10s  val_acc=0.6882 ✓
+  Epoch 3/10  loss=0.8095  time=42.11s  val_acc=0.6998 ✓
+  Epoch 4/10  loss=0.6105  time=42.11s  val_acc=0.7479 ✓
+  Epoch 5/10  loss=0.4532  time=42.09s  val_acc=0.7579 ✓
+  Epoch 6/10  loss=0.3500  time=42.13s  val_acc=0.7562 (patience: 1/3)
+  Epoch 7/10  loss=0.2542  time=42.11s  val_acc=0.7512 (patience: 2/3)
+  Epoch 8/10  loss=0.2116  time=42.13s  val_acc=0.7562 (patience: 3/3)
+
+Notes:
+- UNEXPECTED:   can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+[ToMe ON]  Merging 8 token pairs per layer
+  Epoch 1/10  loss=1.9498  time=42.35s  val_acc=0.6169 ✓
+  Epoch 2/10  loss=1.1438  time=42.10s  val_acc=0.6882 ✓
+  Epoch 3/10  loss=0.8095  time=42.11s  val_acc=0.6998 ✓
+  Epoch 4/10  loss=0.6105  time=42.11s  val_acc=0.7479 ✓
+  Epoch 5/10  loss=0.4532  time=42.09s  val_acc=0.7579 ✓
+  Epoch 6/10  loss=0.3500  time=42.13s  val_acc=0.7562 (patience: 1/3)
+  Epoch 7/10  loss=0.2542  time=42.11s  val_acc=0.7512 (patience: 2/3)
+  Epoch 8/10  loss=0.2116  time=42.13s  val_acc=0.7562 (patience: 3/3)
+  Early stopping at epoch 8 (best epoch: 5)
+
+  Test Results:
+    Top-1  Accuracy: 0.7566
+    Top-3  Accuracy: 0.9437
+    Top-5  Accuracy: 0.9801
+    Top-10 Accuracy: 0.9917
+    Avg batch inference: 17.38 ms
+    Peak GPU memory: 2230.5 MB
+    Total training time: 337.13s
+    Epochs trained: 8/10
+
+===========================================================================
+  COMPARISON SUMMARY - TOP-K ACCURACY TABLE
+===========================================================================
+Metric                           Baseline            ToMe               Δ
+---------------------------------------------------------------------------
+Top-1 Accuracy                     0.7566          0.7566           0.00%
+Top-3 Accuracy                     0.9503          0.9437          -0.66%
+Top-5 Accuracy                     0.9752          0.9801           0.50%
+Top-10 Accuracy                    0.9917          0.9917           0.00%
+---------------------------------------------------------------------------
+Avg Inference (ms)                   6.62           17.38          10.76
+Peak GPU Memory (MB)               2241.0          2230.5          -10.6
+Epochs Trained                         10               8
+---------------------------------------------------------------------------
+  Speed-up factor: 0.38×
+===========================================================================
+
+=======================================================
+  TOTAL SCRIPT EXECUTION TIME: 978.28s (16.30 min)
+=======================================================
