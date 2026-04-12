@@ -1,0 +1,267 @@
+(venv) PS C:\Users\Admin\Downloads\tome> py C:\Users\Admin\Downloads\tome\ToMe_2.py
+
+Device: cuda
+============================================================
+After filtering — classes: 15 | samples: 3017
+  [Warning] Dropped 3 samples (classes with <2 examples in temp set)
+Train: 1810 | Val: 602 | Test: 602 | Classes: 15
+
+── BASELINE ──────────────────────────────────────
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Loading weights: 100%|███████████████████████████████████████████████████████████| 199/199 [00:00<00:00, 4576.35it/s]
+BertModel LOAD REPORT from: bert-base-uncased
+Key                                        | Status     |  | 
+-------------------------------------------+------------+--+-
+cls.predictions.transform.LayerNorm.weight | UNEXPECTED |  |
+cls.predictions.transform.LayerNorm.bias   | UNEXPECTED |  |
+cls.predictions.bias                       | UNEXPECTED |  |
+cls.seq_relationship.bias                  | UNEXPECTED |  |
+cls.predictions.transform.dense.bias       | UNEXPECTED |  |
+cls.seq_relationship.weight                | UNEXPECTED |  |
+cls.predictions.transform.dense.weight     | UNEXPECTED |  |
+
+Notes:
+- UNEXPECTED:   can be ignored when loading from different task/architecture; not ok if you expect identical arch.    
+Loading weights: 100%|███████████████████████████████████████████████████████████| 199/199 [00:00<00:00, 9507.43it/s] 
+BertModel LOAD REPORT from: bert-base-uncased
+Key                                        | Status     |  |
+-------------------------------------------+------------+--+-
+cls.predictions.transform.LayerNorm.weight | UNEXPECTED |  |
+cls.predictions.transform.LayerNorm.bias   | UNEXPECTED |  |
+cls.predictions.bias                       | UNEXPECTED |  |
+cls.seq_relationship.bias                  | UNEXPECTED |  |
+cls.predictions.transform.dense.bias       | UNEXPECTED |  |
+cls.seq_relationship.weight                | UNEXPECTED |  |
+cls.predictions.transform.dense.weight     | UNEXPECTED |  |
+
+Notes:
+- UNEXPECTED:   can be ignored when loading from different task/architecture; not ok if you expect identical arch.    
+[ToMe OFF] Standard BERT
+  Epoch 1/10  loss=1.8894  t=93.8s  val_acc=0.6279  ✓ saved
+  Epoch 2/10  loss=0.6304  t=52.8s  val_acc=0.7159  ✓ saved
+  Epoch 3/10  loss=0.4102  t=53.0s  val_acc=0.7575  ✓ saved
+  Epoch 4/10  loss=0.2694  t=53.1s  val_acc=0.7741  ✓ saved
+  Epoch 5/10  loss=0.2230  t=53.1s  val_acc=0.7708  (patience 1/3)
+  Epoch 6/10  loss=0.1118  t=53.2s  val_acc=0.7724  (patience 2/3)
+  Epoch 7/10  loss=0.0912  t=53.4s  val_acc=0.8040  ✓ saved
+  Epoch 8/10  loss=0.0666  t=53.8s  val_acc=0.7841  (patience 1/3)
+  Epoch 9/10  loss=0.0416  t=54.4s  val_acc=0.7824  (patience 2/3)
+  Epoch 10/10  loss=0.0375  t=54.2s  val_acc=0.7841  (patience 3/3)
+  Early stop at epoch 10 (best: epoch 7)
+  Reloaded best model (epoch 7, val_acc=0.8040)
+
+  Test Results:
+    Top-1  Accuracy : 0.7757
+    Top-3  Accuracy : 0.9601
+    Top-5  Accuracy : 0.9867
+    Top-10 Accuracy : 1.0000
+    Avg batch latency: 6.61 ms
+    Peak memory      : 2263.2 MB
+    Train time       : 574.8s
+    Epochs           : 10 (best: 7)
+
+── TOME ──────────────────────────────────────
+Loading weights: 100%|███████████████████████████████████████████████████████████| 199/199 [00:00<00:00, 4292.60it/s]
+BertModel LOAD REPORT from: bert-base-uncased
+Key                                        | Status     |  |
+-------------------------------------------+------------+--+-
+cls.predictions.transform.LayerNorm.weight | UNEXPECTED |  |
+cls.predictions.transform.LayerNorm.bias   | UNEXPECTED |  |
+cls.predictions.bias                       | UNEXPECTED |  |
+cls.seq_relationship.bias                  | UNEXPECTED |  |
+cls.predictions.transform.dense.bias       | UNEXPECTED |  |
+cls.seq_relationship.weight                | UNEXPECTED |  |
+cls.predictions.transform.dense.weight     | UNEXPECTED |  |
+
+Notes:
+- UNEXPECTED:   can be ignored when loading from different task/architecture; not ok if you expect identical arch.    
+[ToMe ON]  r=8, metric=keys
+  Epoch 1/10  loss=2.4601  t=42.8s  val_acc=0.4917  ✓ saved
+  Epoch 2/10  loss=0.8416  t=42.9s  val_acc=0.6478  ✓ saved
+  Epoch 3/10  loss=0.6194  t=42.8s  val_acc=0.6827  ✓ saved
+  Epoch 4/10  loss=0.4739  t=42.8s  val_acc=0.6827  (patience 1/3)
+  Epoch 5/10  loss=0.3855  t=42.9s  val_acc=0.7342  ✓ saved
+  Epoch 6/10  loss=0.2663  t=43.2s  val_acc=0.7359  ✓ saved
+  Epoch 7/10  loss=0.2180  t=43.2s  val_acc=0.7508  ✓ saved
+  Epoch 8/10  loss=0.1955  t=43.2s  val_acc=0.7625  ✓ saved
+  Epoch 9/10  loss=0.1505  t=43.0s  val_acc=0.7724  ✓ saved
+  Epoch 10/10  loss=0.1144  t=43.1s  val_acc=0.7641  (patience 1/3)
+  Reloaded best model (epoch 9, val_acc=0.7724)
+
+  Test Results:
+    Top-1  Accuracy : 0.7641
+    Top-3  Accuracy : 0.9551
+    Top-5  Accuracy : 0.9850
+    Top-10 Accuracy : 1.0000
+    Avg batch latency: 18.14 ms
+    Peak memory      : 3108.7 MB
+    Train time       : 430.0s
+    Epochs           : 10 (best: 9)
+
+===========================================================================
+  COMPARISON SUMMARY
+===========================================================================
+Metric                          Baseline           ToMe              Δ
+---------------------------------------------------------------------------
+Top-1 Accuracy                    0.7757         0.7641         -1.16%
+Top-3 Accuracy                    0.9601         0.9551         -0.50%
+Top-5 Accuracy                    0.9867         0.9850         -0.17%
+Top-10 Accuracy                   1.0000         1.0000          0.00%
+---------------------------------------------------------------------------
+Avg Inference (ms)                  6.61          18.14         11.53
+Peak Memory (MB)                  2263.2         3108.7         845.5
+Best epoch                             7              9
+Epochs trained                        10             10
+---------------------------------------------------------------------------
+  Speed-up factor : 0.36×
+===========================================================================
+
+============================================================
+  Total time: 1122.4s  (18.7 min)
+============================================================
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+##############
+#  20 epochs #
+##############
+
+
+Device: cuda
+============================================================
+After filtering — classes: 15 | samples: 3017
+  [Warning] Dropped 3 samples (classes with <2 examples in temp set)
+Train: 1810 | Val: 602 | Test: 602 | Classes: 15
+
+── BASELINE ──────────────────────────────────────
+Loading weights: 100%|███████████████████████████████████████████████████████████| 199/199 [00:00<00:00, 8985.73it/s]
+BertModel LOAD REPORT from: bert-base-uncased
+Key                                        | Status     |  |
+-------------------------------------------+------------+--+-
+cls.seq_relationship.bias                  | UNEXPECTED |  |
+cls.seq_relationship.weight                | UNEXPECTED |  |
+cls.predictions.transform.dense.weight     | UNEXPECTED |  |
+cls.predictions.transform.LayerNorm.bias   | UNEXPECTED |  |
+cls.predictions.transform.dense.bias       | UNEXPECTED |  |
+cls.predictions.bias                       | UNEXPECTED |  |
+cls.predictions.transform.LayerNorm.weight | UNEXPECTED |  |
+
+Notes:
+- UNEXPECTED:   can be ignored when loading from different task/architecture; not ok if you expect identical arch.    
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Loading weights: 100%|██████████████████████████████████████████████████████████| 199/199 [00:00<00:00, 12723.38it/s]
+BertModel LOAD REPORT from: bert-base-uncased
+Key                                        | Status     |  |
+-------------------------------------------+------------+--+-
+cls.seq_relationship.bias                  | UNEXPECTED |  |
+cls.seq_relationship.weight                | UNEXPECTED |  |
+cls.predictions.transform.dense.weight     | UNEXPECTED |  |
+cls.predictions.transform.LayerNorm.bias   | UNEXPECTED |  |
+cls.predictions.transform.dense.bias       | UNEXPECTED |  |
+cls.predictions.bias                       | UNEXPECTED |  |
+cls.predictions.transform.LayerNorm.weight | UNEXPECTED |  |
+
+Notes:
+- UNEXPECTED:   can be ignored when loading from different task/architecture; not ok if you expect identical arch.    
+[ToMe OFF] Standard BERT
+  Epoch 1/20  loss=2.4219  t=47.0s  val_acc=0.4751  ✓ saved
+  Epoch 2/20  loss=0.9719  t=46.2s  val_acc=0.6611  ✓ saved
+  Epoch 3/20  loss=0.5393  t=46.5s  val_acc=0.7591  ✓ saved
+  Epoch 4/20  loss=0.3688  t=46.6s  val_acc=0.7359  (patience 1/3)
+  Epoch 5/20  loss=0.2862  t=46.7s  val_acc=0.7591  (patience 2/3)
+  Epoch 6/20  loss=0.1872  t=46.8s  val_acc=0.7492  (patience 3/3)
+  Early stop at epoch 6 (best: epoch 3)
+  Reloaded best model (epoch 3, val_acc=0.7591)
+
+  Test Results:
+    Top-1  Accuracy : 0.7159
+    Top-3  Accuracy : 0.9452
+    Top-5  Accuracy : 0.9801
+    Top-10 Accuracy : 1.0000
+    Avg batch latency: 6.70 ms
+    Peak memory      : 2657.1 MB
+    Train time       : 279.8s
+    Epochs           : 6 (best: 3)
+
+── TOME ──────────────────────────────────────
+Loading weights: 100%|███████████████████████████████████████████████████████████| 199/199 [00:00<00:00, 8749.86it/s]
+BertModel LOAD REPORT from: bert-base-uncased
+Key                                        | Status     |  |
+-------------------------------------------+------------+--+-
+cls.seq_relationship.bias                  | UNEXPECTED |  |
+cls.seq_relationship.weight                | UNEXPECTED |  |
+cls.predictions.transform.dense.weight     | UNEXPECTED |  |
+cls.predictions.transform.LayerNorm.bias   | UNEXPECTED |  |
+cls.predictions.transform.dense.bias       | UNEXPECTED |  |
+cls.predictions.bias                       | UNEXPECTED |  |
+cls.predictions.transform.LayerNorm.weight | UNEXPECTED |  |
+
+Notes:
+- UNEXPECTED:   can be ignored when loading from different task/architecture; not ok if you expect identical arch.    
+[ToMe ON]  r=8, metric=keys
+  Epoch 1/20  loss=2.7946  t=35.6s  val_acc=0.1512  ✓ saved
+  Epoch 2/20  loss=1.5833  t=35.4s  val_acc=0.5266  ✓ saved
+  Epoch 3/20  loss=0.7862  t=35.8s  val_acc=0.6877  ✓ saved
+  Epoch 4/20  loss=0.5586  t=35.6s  val_acc=0.6346  (patience 1/3)
+  Epoch 5/20  loss=0.4819  t=36.5s  val_acc=0.7093  ✓ saved
+  Epoch 6/20  loss=0.3305  t=36.3s  val_acc=0.7226  ✓ saved
+  Epoch 7/20  loss=0.3029  t=36.5s  val_acc=0.7126  (patience 1/3)
+  Epoch 8/20  loss=0.2602  t=36.5s  val_acc=0.7342  ✓ saved
+  Epoch 9/20  loss=0.1761  t=36.4s  val_acc=0.7475  ✓ saved
+  Epoch 10/20  loss=0.1314  t=36.4s  val_acc=0.7575  ✓ saved
+  Epoch 11/20  loss=0.1030  t=36.7s  val_acc=0.7442  (patience 1/3)
+  Epoch 12/20  loss=0.0967  t=36.5s  val_acc=0.7558  (patience 2/3)
+  Epoch 13/20  loss=0.0664  t=36.7s  val_acc=0.7525  (patience 3/3)
+  Early stop at epoch 13 (best: epoch 10)
+  Reloaded best model (epoch 10, val_acc=0.7575)
+
+  Test Results:
+    Top-1  Accuracy : 0.7259
+    Top-3  Accuracy : 0.9468
+    Top-5  Accuracy : 0.9817
+    Top-10 Accuracy : 0.9950
+    Avg batch latency: 18.69 ms
+    Peak memory      : 3532.8 MB
+    Train time       : 470.8s
+    Epochs           : 13 (best: 10)
+
+===========================================================================
+  COMPARISON SUMMARY
+===========================================================================
+Metric                          Baseline           ToMe              Δ
+---------------------------------------------------------------------------
+Top-1 Accuracy                    0.7159         0.7259          1.00%
+Top-3 Accuracy                    0.9452         0.9468          0.17%
+Top-5 Accuracy                    0.9801         0.9817          0.17%
+Top-10 Accuracy                   1.0000         0.9950         -0.50%
+---------------------------------------------------------------------------
+Avg Inference (ms)                  6.70          18.69         12.00
+Peak Memory (MB)                  2657.1         3532.8         875.7
+Best epoch                             3             10
+Epochs trained                         6             13
+---------------------------------------------------------------------------
+  Speed-up factor : 0.36×
+===========================================================================
+
+============================================================
+  Total time: 852.7s  (14.2 min)
+============================================================

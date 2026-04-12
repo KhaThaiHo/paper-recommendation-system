@@ -69,3 +69,6 @@ htmlcov/
 .mypy_cache/
 .dmypy.json
 dmypy.json
+
+
+ToMe_2.py
