@@ -153,6 +153,19 @@ def bipartite_soft_matching(
 # 3. ToMe-PATCHED BERT SELF-ATTENTION
 # ─────────────────────────────────────────────
 
+# Biến đo thời gian merge toàn cục để báo cáo sau mỗi epoch
+TOME_MERGE_TIME = {"total_ms": 0.0, "call_count": 0}
+
+def reset_tome_timer():
+    """Reset the ToMe merge timing counters."""
+    global TOME_MERGE_TIME
+    TOME_MERGE_TIME = {"total_ms": 0.0, "call_count": 0}
+
+def get_tome_timer_stats():
+    """Get ToMe merge timing statistics."""
+    global TOME_MERGE_TIME
+    return TOME_MERGE_TIME.copy()
+
 class ToMeBertAttention(nn.Module):
     """
     Replaces the ENTIRE BertAttention block (self-attn + output projection +
@@ -217,6 +230,10 @@ class ToMeBertAttention(nn.Module):
         # ── Token Merging ────────────────────────────────────────────────
         T = hidden_states.size(1)
         if self.r > 0 and T > 2:
+            global TOME_MERGE_TIME
+            
+            t_merge_start = time.perf_counter()
+            
             metric = k.mean(dim=1)                      # (B, T, d)
             merge_fn, _ = bipartite_soft_matching(metric, self.r)
 
@@ -226,6 +243,11 @@ class ToMeBertAttention(nn.Module):
 
             # KEY FIX: merge residual to T' so sizes match for LayerNorm
             residual = merge_fn(residual)               # (B, T', C)
+            
+            t_merge_end = time.perf_counter()
+            merge_time_ms = (t_merge_end - t_merge_start) * 1000
+            TOME_MERGE_TIME["total_ms"] += merge_time_ms
+            TOME_MERGE_TIME["call_count"] += 1
         # ────────────────────────────────────────────────────────────────
 
         scale  = math.sqrt(self.attention_head_size)
@@ -409,45 +431,63 @@ def run_benchmark(
     print(f"\nUsing device: {device}\n{'='*55}")
 
     # ── Preprocess ────────────────────────────────────────────
+    t_preprocess = time.perf_counter()
     df = load_and_preprocess(df)
     df = df.dropna(subset=["Label"])
 
-    le = LabelEncoder()
-    labels = le.fit_transform(df["Label"].astype(str))
-    num_labels = len(le.classes_)
-    print(f"Classes: {num_labels}  |  Samples: {len(df)}")
-    
-    # Filter classes with too few samples (minimum 3 samples per class for stratified split)
-    label_counts = pd.Series(labels).value_counts()
-    valid_labels = label_counts[label_counts >= 3].index.tolist()
-    mask = pd.Series(labels).isin(valid_labels)
+    # Dùng raw string labels để stratify và lọc, sau đó mới encode để tránh mất class do stratify
+    raw_labels = df["Label"].astype(str).tolist()
+
+    # Lọc class có ít hơn 3 mẫu (dùng Counter, không cần encoder)
+    from collections import Counter
+    label_counts = Counter(raw_labels)
+    valid_label_set = {l for l, c in label_counts.items() if c >= 3}
+    mask = [l in valid_label_set for l in raw_labels]
     df = df[mask].reset_index(drop=True)
-    labels = labels[mask]
-    
-    # Re-encode labels after filtering
+    raw_labels = [l for l, m in zip(raw_labels, mask) if m]
+
+    # Split TRƯỚC khi encode
+    texts = df["text"].tolist()
+    (X_train, X_temp,
+     y_train_raw, y_temp_raw) = train_test_split(
+        texts, raw_labels,
+        test_size=0.4, random_state=42,
+        stratify=raw_labels          # stratify trên raw string
+    )
+    (X_val, X_test,
+     y_val_raw, y_test_raw) = train_test_split(
+        X_temp, y_temp_raw,
+        test_size=0.5, random_state=42,
+        # stratify=y_temp_raw        
+    )
+
+    # Encode labels sau khi split để đảm bảo không mất class do stratify
     le = LabelEncoder()
-    labels = le.fit_transform(df["Label"].astype(str))
+    y_train = le.fit_transform(y_train_raw)          # fit + transform
+    y_val   = le.transform(y_val_raw)                # transform only
+    y_test  = le.transform(y_test_raw)               # transform only
     num_labels = len(le.classes_)
-    print(f"After filtering: Classes: {num_labels}  |  Samples: {len(df)}")
 
+    print(f"Classes: {num_labels} | Train: {len(y_train)} "
+          f"| Val: {len(y_val)} | Test: {len(y_test)}")
+    
+    t_tokenize = time.perf_counter()
     tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+    print(f"  [Loaded tokenizer]: {time.perf_counter() - t_tokenize:.2f}s")
 
-    # Split: train (60%), val (20%), test (20%)
-    X_train, X_temp, y_train, y_temp = train_test_split(
-        df["text"].tolist(), labels, test_size=0.4, random_state=42, stratify=labels
-    )
-    # Split temp thành val và test (không dùng stratify vì data nhỏ)
-    X_val, X_test, y_val, y_test = train_test_split(
-        X_temp, y_temp, test_size=0.5, random_state=42
-    )
-
+    # ── Create Datasets ────────────────────────────────────────
+    t_dataset = time.perf_counter()
     train_ds = PaperDataset(X_train, y_train, tokenizer, max_length)
     val_ds   = PaperDataset(X_val,   y_val,   tokenizer, max_length)
     test_ds  = PaperDataset(X_test,  y_test,  tokenizer, max_length)
-
+    print(f"  [Created datasets]: {time.perf_counter() - t_dataset:.2f}s")
+    
+    t_loader = time.perf_counter()
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
     val_loader   = DataLoader(val_ds,   batch_size=batch_size)
     test_loader  = DataLoader(test_ds,  batch_size=batch_size)
+    print(f"  [Created dataloaders]: {time.perf_counter() - t_loader:.2f}s")
+    print(f"  Total preprocessing & data prep: {time.perf_counter() - t_preprocess:.2f}s\n")
 
     results = []
     for use_tome in [False, True]:
@@ -457,32 +497,49 @@ def run_benchmark(
         if device.type == "cuda":
             torch.cuda.reset_peak_memory_stats(device)
 
+        # ── Initialize Model ────────────────────────────────────
+        t_init = time.perf_counter()
         model = BertClassifier(num_labels, use_tome=use_tome, tome_r=tome_r).to(device)
         optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
         criterion = nn.CrossEntropyLoss()
+        t_init_ms = (time.perf_counter() - t_init) * 1000
+        print(f"  [Model initialized]: {t_init_ms:.2f}ms")
         
         total_train_time = 0
         best_val_acc = 0
         patience_counter = 0
         best_epoch = 0
         epochs_trained = 0
+        best_model_state = None
 
+        # ── Training Loop ────────────────────────────────────────
+        t_training_start = time.perf_counter()
         for epoch in range(num_epochs):
+            # Reset ToMe timer
+            reset_tome_timer()
+            
             loss, epoch_time = train_one_epoch(model, train_loader, optimizer, criterion, device)
             total_train_time += epoch_time
             epochs_trained += 1
             
             # Validation
+            t_eval = time.perf_counter()
             val_metrics, _ = evaluate(model, val_loader, device)
+            eval_time_ms = (time.perf_counter() - t_eval) * 1000
             val_acc = val_metrics['top1']
             
-            print(f"  Epoch {epoch+1}/{num_epochs}  loss={loss:.4f}  time={epoch_time:.2f}s  val_acc={val_acc:.4f}", end="")
+            # Get ToMe stats if using ToMe
+            tome_stats = get_tome_timer_stats()
+            tome_info = f"  ToMe merge: {tome_stats['total_ms']:.2f}ms ({tome_stats['call_count']} calls)" if tome_stats['call_count'] > 0 else ""
+            
+            print(f"  Epoch {epoch+1}/{num_epochs}  loss={loss:.4f}  train={epoch_time:.2f}s  eval={eval_time_ms:.2f}ms  val_acc={val_acc:.4f}{tome_info}", end="")
             
             # Early stopping
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
                 patience_counter = 0
                 best_epoch = epoch + 1
+                best_model_state = model.state_dict().copy()
                 print(" ✓")
             else:
                 patience_counter += 1
@@ -491,8 +548,20 @@ def run_benchmark(
                     print(f"  Early stopping at epoch {epoch+1} (best epoch: {best_epoch})")
                     break
 
-        # Test evaluation
+        t_training_end = time.perf_counter()
+        training_duration = t_training_end - t_training_start
+        print(f"  [Training completed]: {training_duration:.2f}s ({epochs_trained} epochs)")
+
+        # Load best model state before testing
+        if best_model_state is not None:
+            model.load_state_dict(best_model_state)
+
+        # ── Test Evaluation ────────────────────────────────────
+        t_test = time.perf_counter()
         test_metrics, avg_ms = evaluate(model, test_loader, device)
+        test_duration = (time.perf_counter() - t_test) * 1000
+        print(f"  [Testing completed]: {test_duration:.2f}ms")
+        
         mem = peak_memory_mb(device)
         params = count_params(model)
 
@@ -565,15 +634,14 @@ if __name__ == "__main__":
     script_start = time.perf_counter()
     
     train = pd.read_csv("C:\\Users\\Admin\\Downloads\\New folder\\data\\train_set.csv")
-    # train_filter = train[(train["Label"] == 1) | (train["Label"] == 0) | (train["Label"] == 2)] # 636 + 729 + 516
-    # print(train_filter.shape)
-    # samples = train_filter.sample(1500, random_state=42).to_dict(orient="records")  # ↓ for quick testing
-    # df = pd.DataFrame(samples)
 
     # Lấy top journals + sample từ top labels + random từ tail + combine
-    top_labels = train["Label"].value_counts().nlargest(10).index.tolist()
-    top_samples = train[train["Label"].isin(top_labels)].groupby("Label").sample(300, random_state=42)
-    tail_samples = train[~train["Label"].isin(top_labels)].sample(300, random_state=42)
+    top_labels   = train["Label"].value_counts().nlargest(10).index.tolist()
+    top_samples  = (train[train["Label"].isin(top_labels)]
+                    .groupby("Label")
+                    .sample(300, random_state=42))
+    tail_samples = (train[~train["Label"].isin(top_labels)]
+                    .sample(300, random_state=42))
     df = pd.concat([top_samples, tail_samples]).reset_index(drop=True)
     
 
