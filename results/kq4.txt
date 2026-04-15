@@ -1,0 +1,261 @@
+(venv) PS C:\Users\Admin\Downloads\tome> py C:\Users\Admin\Downloads\tome\ToMe_1.py
+
+Using device: cuda
+=======================================================
+Classes: 15 | Train: 1810 | Val: 603 | Test: 604
+  [Loaded tokenizer]: 1.85s
+  [Created datasets]: 0.77s
+  [Created dataloaders]: 0.00s
+  Total preprocessing & data prep: 2.64s
+
+
+── ToMe OFF ──────────────────────────────────────────
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Loading weights: 100%|███████████████████████████████████████████████████████████████████████| 199/199 [00:00<00:00, 3993.10it/s]
+BertModel LOAD REPORT from: bert-base-uncased
+Key                                        | Status     |  |
+-------------------------------------------+------------+--+-
+cls.predictions.bias                       | UNEXPECTED |  |
+cls.predictions.transform.LayerNorm.bias   | UNEXPECTED |  |
+cls.predictions.transform.dense.weight     | UNEXPECTED |  |
+cls.predictions.transform.LayerNorm.weight | UNEXPECTED |  |
+cls.seq_relationship.bias                  | UNEXPECTED |  |
+cls.seq_relationship.weight                | UNEXPECTED |  |
+cls.predictions.transform.dense.bias       | UNEXPECTED |  |
+
+Notes:
+- UNEXPECTED:   can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+[ToMe OFF] Standard BERT (no merging)
+  [Model initialized]: 2905.89ms
+  Epoch 1/10  loss=1.7964  train=58.79s  eval=4495.99ms  val_acc=0.7114 ✓
+  Epoch 2/10  loss=0.9411  train=52.13s  eval=4523.24ms  val_acc=0.7529 ✓
+  Epoch 3/10  loss=0.5687  train=52.37s  eval=4534.95ms  val_acc=0.7612 ✓
+  Epoch 4/10  loss=0.3533  train=52.49s  eval=4546.46ms  val_acc=0.7828 ✓
+  Epoch 5/10  loss=0.2128  train=52.62s  eval=4549.68ms  val_acc=0.7794 (patience: 1/3)
+  Epoch 6/10  loss=0.1101  train=52.79s  eval=4575.20ms  val_acc=0.7828 (patience: 2/3)
+  Epoch 7/10  loss=0.0783  train=52.74s  eval=4565.11ms  val_acc=0.7894 ✓
+  Epoch 8/10  loss=0.0598  train=52.66s  eval=4556.13ms  val_acc=0.7960 ✓
+  Epoch 9/10  loss=0.0433  train=52.73s  eval=4564.71ms  val_acc=0.7496 (patience: 1/3)
+  Epoch 10/10  loss=0.0256  train=52.79s  eval=4560.72ms  val_acc=0.7711 (patience: 2/3)
+  [Training completed]: 577.60s (10 epochs)
+  [Testing completed]: 4563.87ms
+
+  Test Results:
+    Top-1  Accuracy: 0.7616
+    Top-3  Accuracy: 0.9437
+    Top-5  Accuracy: 0.9719
+    Top-10 Accuracy: 0.9983
+    Avg batch inference: 6.18 ms
+    Peak GPU memory: 2241.0 MB
+    Total training time: 532.11s
+    Epochs trained: 10/10
+
+── ToMe ON  ──────────────────────────────────────────
+Loading weights: 100%|███████████████████████████████████████████████████████████████████████| 199/199 [00:00<00:00, 4769.60it/s]
+BertModel LOAD REPORT from: bert-base-uncased
+Key                                        | Status     |  |
+-------------------------------------------+------------+--+-
+cls.predictions.bias                       | UNEXPECTED |  |
+cls.predictions.transform.LayerNorm.bias   | UNEXPECTED |  |
+cls.predictions.transform.dense.weight     | UNEXPECTED |  |
+cls.predictions.transform.LayerNorm.weight | UNEXPECTED |  |
+cls.seq_relationship.bias                  | UNEXPECTED |  |
+cls.seq_relationship.weight                | UNEXPECTED |  |
+cls.predictions.transform.dense.bias       | UNEXPECTED |  |
+
+Notes:
+- UNEXPECTED:   can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+[ToMe ON]  Merging 8 token pairs per layer
+  [Model initialized]: 1966.03ms
+  Epoch 1/10  loss=1.9318  train=41.97s  eval=3376.69ms  val_acc=0.5357  ToMe merge: 3591.60ms (3636 calls) ✓
+  Epoch 2/10  loss=1.1492  train=41.87s  eval=3378.51ms  val_acc=0.6750  ToMe merge: 3674.98ms (3636 calls) ✓
+  Epoch 3/10  loss=0.7760  train=41.87s  eval=3380.26ms  val_acc=0.6451  ToMe merge: 3752.78ms (3636 calls) (patience: 1/3)
+  Epoch 4/10  loss=0.5630  train=41.91s  eval=3375.00ms  val_acc=0.7065  ToMe merge: 3711.87ms (3636 calls) ✓
+  Epoch 5/10  loss=0.3961  train=42.10s  eval=3408.28ms  val_acc=0.7463  ToMe merge: 4154.36ms (3636 calls) ✓
+  Epoch 6/10  loss=0.2717  train=42.11s  eval=3416.66ms  val_acc=0.7595  ToMe merge: 4412.91ms (3636 calls) ✓
+  Epoch 7/10  loss=0.2160  train=42.02s  eval=3420.04ms  val_acc=0.7496  ToMe merge: 4162.59ms (3636 calls) (patience: 1/3)
+  Epoch 8/10  loss=0.1527  train=41.95s  eval=3385.81ms  val_acc=0.7645  ToMe merge: 3881.38ms (3636 calls) ✓
+  Epoch 9/10  loss=0.1099  train=41.96s  eval=3431.80ms  val_acc=0.7761  ToMe merge: 4199.45ms (3636 calls) ✓
+  Epoch 10/10  loss=0.0914  train=41.87s  eval=3375.79ms  val_acc=0.7413  ToMe merge: 3707.16ms (3636 calls) (patience: 1/3)
+  [Training completed]: 453.60s (10 epochs)
+  [Testing completed]: 3381.30ms
+
+  Test Results:
+    Top-1  Accuracy: 0.7450
+    Top-3  Accuracy: 0.9421
+    Top-5  Accuracy: 0.9735
+    Top-10 Accuracy: 0.9967
+    Avg batch inference: 18.73 ms
+    Peak GPU memory: 2230.5 MB
+    Total training time: 419.63s
+    Epochs trained: 10/10
+
+===========================================================================
+  COMPARISON SUMMARY - TOP-K ACCURACY TABLE
+===========================================================================
+Metric                           Baseline            ToMe               Δ
+    Avg batch inference: 18.73 ms
+    Peak GPU memory: 2230.5 MB
+    Total training time: 419.63s
+    Epochs trained: 10/10
+
+===========================================================================
+  COMPARISON SUMMARY - TOP-K ACCURACY TABLE
+===========================================================================
+Metric                           Baseline            ToMe               Δ
+    Total training time: 419.63s
+    Epochs trained: 10/10
+
+===========================================================================
+  COMPARISON SUMMARY - TOP-K ACCURACY TABLE
+===========================================================================
+Metric                           Baseline            ToMe               Δ
+===========================================================================
+  COMPARISON SUMMARY - TOP-K ACCURACY TABLE
+===========================================================================
+Metric                           Baseline            ToMe               Δ
+  COMPARISON SUMMARY - TOP-K ACCURACY TABLE
+===========================================================================
+Metric                           Baseline            ToMe               Δ
+Metric                           Baseline            ToMe               Δ
+---------------------------------------------------------------------------
+Top-1 Accuracy                     0.7616          0.7450          -1.66%
+Top-3 Accuracy                     0.9437          0.9421          -0.17%
+Top-5 Accuracy                     0.9719          0.9735           0.17%
+Top-10 Accuracy                    0.9983          0.9967          -0.17%
+---------------------------------------------------------------------------
+Avg Inference (ms)                   6.18           18.73          12.55
+Peak GPU Memory (MB)               2241.0          2230.5          -10.6
+Epochs Trained                         10              10
+---------------------------------------------------------------------------
+  Speed-up factor: 0.33×
+===========================================================================
+
+=======================================================
+  TOTAL SCRIPT EXECUTION TIME: 1059.49s (17.66 min)
+=======================================================
+
+
+
+
+
+
+
+
+
+
+
+
+###############
+#    KAGGLE   #
+###############
+
+Using device: cuda
+=======================================================
+Classes: 1406 | Train: 60000 | Val: 20000 | Test: 20000
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+  [Loaded tokenizer]: 1.15s
+  [Created datasets]: 61.54s
+  [Created dataloaders]: 0.00s
+  Total preprocessing & data prep: 63.46s
+
+
+── ToMe OFF ──────────────────────────────────────────
+BertModel LOAD REPORT from: bert-base-uncased
+Key                                        | Status     |  | 
+-------------------------------------------+------------+--+-
+cls.predictions.transform.dense.weight     | UNEXPECTED |  | 
+cls.seq_relationship.bias                  | UNEXPECTED |  | 
+cls.predictions.transform.dense.bias       | UNEXPECTED |  | 
+cls.predictions.transform.LayerNorm.bias   | UNEXPECTED |  | 
+cls.predictions.transform.LayerNorm.weight | UNEXPECTED |  | 
+cls.seq_relationship.weight                | UNEXPECTED |  | 
+cls.predictions.bias                       | UNEXPECTED |  | 
+
+Notes:
+- UNEXPECTED	:can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+[ToMe OFF] Standard BERT (no merging)
+  [Model initialized]: 3915.04ms
+  Epoch 1/10  loss=6.1286  train=1586.72s  eval=151238.43ms  val_acc=0.1353 ✓
+  Epoch 2/10  loss=4.6009  train=1591.45s  eval=151461.28ms  val_acc=0.2204 ✓
+  Epoch 3/10  loss=3.6730  train=1588.88s  eval=151170.96ms  val_acc=0.2744 ✓
+  Epoch 4/10  loss=3.0283  train=1590.97s  eval=151104.45ms  val_acc=0.2981 ✓
+  Epoch 5/10  loss=2.5125  train=1590.66s  eval=151463.25ms  val_acc=0.3120 ✓
+  Epoch 6/10  loss=2.0827  train=1591.95s  eval=151588.55ms  val_acc=0.3153 ✓
+  Epoch 7/10  loss=1.7144  train=1590.80s  eval=150471.27ms  val_acc=0.3196 ✓
+  Epoch 8/10  loss=1.3848  train=1590.31s  eval=151249.06ms  val_acc=0.3187 (patience: 1/3)
+  Epoch 9/10  loss=1.1119  train=1589.94s  eval=151249.88ms  val_acc=0.3140 (patience: 2/3)
+  Epoch 10/10  loss=0.8891  train=1590.31s  eval=150882.64ms  val_acc=0.3141 (patience: 3/3)
+  Early stopping at epoch 10 (best epoch: 7)
+  [Training completed]: 17413.89s (10 epochs)
+  [Testing completed]: 151274.21ms
+
+  Test Results:
+    Top-1  Accuracy: 0.3096
+    Top-3  Accuracy: 0.4708
+    Top-5  Accuracy: 0.5440
+    Top-10 Accuracy: 0.6379
+    Avg batch inference: 7.54 ms
+    Peak GPU memory: 2244.3 MB
+    Total training time: 15901.99s
+    Epochs trained: 10/10
+
+── ToMe ON  ──────────────────────────────────────────
+BertModel LOAD REPORT from: bert-base-uncased
+Key                                        | Status     |  | 
+-------------------------------------------+------------+--+-
+cls.predictions.transform.dense.weight     | UNEXPECTED |  | 
+cls.seq_relationship.bias                  | UNEXPECTED |  | 
+cls.predictions.transform.dense.bias       | UNEXPECTED |  | 
+cls.predictions.transform.LayerNorm.bias   | UNEXPECTED |  | 
+cls.predictions.transform.LayerNorm.weight | UNEXPECTED |  | 
+cls.seq_relationship.weight                | UNEXPECTED |  | 
+cls.predictions.bias                       | UNEXPECTED |  | 
+
+Notes:
+- UNEXPECTED	:can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+[ToMe ON]  Merging 8 token pairs per layer
+  [Model initialized]: 787.97ms
+  Epoch 1/10  loss=6.2512  train=1159.00s  eval=107127.44ms  val_acc=0.1002  ToMe merge: 149324.98ms (120000 calls) ✓
+  Epoch 2/10  loss=4.9670  train=1158.81s  eval=107328.14ms  val_acc=0.1604  ToMe merge: 149374.39ms (120000 calls) ✓
+  Epoch 3/10  loss=4.1545  train=1158.48s  eval=107286.70ms  val_acc=0.2099  ToMe merge: 150059.25ms (120000 calls) ✓
+  Epoch 4/10  loss=3.5860  train=1157.72s  eval=107176.25ms  val_acc=0.2514  ToMe merge: 148887.85ms (120000 calls) ✓
+  Epoch 5/10  loss=3.1588  train=1157.18s  eval=107085.63ms  val_acc=0.2694  ToMe merge: 149602.45ms (120000 calls) ✓
+  Epoch 6/10  loss=2.7941  train=1157.37s  eval=107071.03ms  val_acc=0.2799  ToMe merge: 148554.31ms (120000 calls) ✓
+  Epoch 7/10  loss=2.4850  train=1158.15s  eval=107219.98ms  val_acc=0.2882  ToMe merge: 148698.01ms (120000 calls) ✓
+  Epoch 8/10  loss=2.2109  train=1157.85s  eval=107059.72ms  val_acc=0.2949  ToMe merge: 149136.69ms (120000 calls) ✓
+  Epoch 9/10  loss=1.9485  train=1156.89s  eval=107150.41ms  val_acc=0.3001  ToMe merge: 150005.78ms (120000 calls) ✓
+  Epoch 10/10  loss=1.7120  train=1157.24s  eval=106700.06ms  val_acc=0.2943  ToMe merge: 152058.24ms (120000 calls) (patience: 1/3)
+  [Training completed]: 12649.93s (10 epochs)
+  [Testing completed]: 106968.35ms
+
+  Test Results:
+    Top-1  Accuracy: 0.2964
+    Top-3  Accuracy: 0.4639
+    Top-5  Accuracy: 0.5422
+    Top-10 Accuracy: 0.6442
+    Avg batch inference: 23.41 ms
+    Peak GPU memory: 2249.1 MB
+    Total training time: 11578.70s
+    Epochs trained: 10/10
+
+===========================================================================
+  COMPARISON SUMMARY - TOP-K ACCURACY TABLE
+===========================================================================
+Metric                           Baseline            ToMe               Δ
+---------------------------------------------------------------------------
+Top-1 Accuracy                     0.3096          0.2964          -1.32%
+Top-3 Accuracy                     0.4708          0.4639          -0.69%
+Top-5 Accuracy                     0.5440          0.5422          -0.18%
+Top-10 Accuracy                    0.6379          0.6442           0.63%
+---------------------------------------------------------------------------
+Avg Inference (ms)                   7.54           23.41          15.87
+Peak GPU Memory (MB)               2244.3          2249.1            4.9
+Epochs Trained                         10              10
+---------------------------------------------------------------------------
+  Speed-up factor: 0.32×
+===========================================================================
+
+=======================================================
+  TOTAL SCRIPT EXECUTION TIME: 30422.43s (507.04 min)
+=======================================================
