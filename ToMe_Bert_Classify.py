@@ -153,6 +153,19 @@ def bipartite_soft_matching(
 # 3. ToMe-PATCHED BERT SELF-ATTENTION
 # ─────────────────────────────────────────────
 
+# Variable to track total ToMe merge time across all calls for reporting after each epoch
+TOME_MERGE_TIME = {"total_ms": 0.0, "call_count": 0}
+
+def reset_tome_timer():
+    """Reset the ToMe merge timing counters."""
+    global TOME_MERGE_TIME
+    TOME_MERGE_TIME = {"total_ms": 0.0, "call_count": 0}
+
+def get_tome_timer_stats():
+    """Get ToMe merge timing statistics."""
+    global TOME_MERGE_TIME
+    return TOME_MERGE_TIME.copy()
+
 class ToMeBertAttention(nn.Module):
     """
     Replaces the ENTIRE BertAttention block (self-attn + output projection +
@@ -217,6 +230,10 @@ class ToMeBertAttention(nn.Module):
         # ── Token Merging ────────────────────────────────────────────────
         T = hidden_states.size(1)
         if self.r > 0 and T > 2:
+            global TOME_MERGE_TIME
+            
+            t_merge_start = time.perf_counter()
+            
             metric = k.mean(dim=1)                      # (B, T, d)
             merge_fn, _ = bipartite_soft_matching(metric, self.r)
 
@@ -226,6 +243,11 @@ class ToMeBertAttention(nn.Module):
 
             # KEY FIX: merge residual to T' so sizes match for LayerNorm
             residual = merge_fn(residual)               # (B, T', C)
+            
+            t_merge_end = time.perf_counter()
+            merge_time_ms = (t_merge_end - t_merge_start) * 1000
+            TOME_MERGE_TIME["total_ms"] += merge_time_ms
+            TOME_MERGE_TIME["call_count"] += 1
         # ────────────────────────────────────────────────────────────────
 
         scale  = math.sqrt(self.attention_head_size)
@@ -283,11 +305,15 @@ class BertClassifier(nn.Module):
 
     def forward(self, input_ids, attention_mask):
         # CLS token representation
-        out = self.bert(input_ids=input_ids, attention_mask=attention_mask)
+        out = self.bert(input_ids=input_ids, attention_mask=attention_mask) # Last hidden states shape: (B, T', 768)
         cls = out.last_hidden_state[:, 0, :]   # (B, 768)
         return self.classifier(cls)
 
-
+# input_ids: [B, T] (Batch size, Sequence length)
+# attention_mask: [B, T]
+# BERT last_hidden_state: [B, T', 768]
+# CLS: [B, 768]
+# logits: [B, num_labels]
 # ─────────────────────────────────────────────
 # 5. TRAINING & EVALUATION HELPERS
 # ─────────────────────────────────────────────
@@ -295,15 +321,21 @@ class BertClassifier(nn.Module):
 @dataclass
 class BenchmarkResult:
     mode: str
-    accuracy: float
+    accuracy_top1: float
+    accuracy_top3: float
+    accuracy_top5: float
+    accuracy_top10: float
     avg_inference_ms: float
     peak_memory_mb: float
     total_params: int
+    epochs_trained: int
 
 
 def train_one_epoch(model, loader, optimizer, criterion, device):
     model.train()
     total_loss = 0
+    epoch_start = time.perf_counter()
+    
     for batch in loader:
         ids  = batch["input_ids"].to(device)
         mask = batch["attention_mask"].to(device)
@@ -315,12 +347,26 @@ def train_one_epoch(model, loader, optimizer, criterion, device):
         nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
         total_loss += loss.item()
-    return total_loss / len(loader)
+    
+    epoch_time = time.perf_counter() - epoch_start
+    return total_loss / len(loader), epoch_time
 
 
-def evaluate(model, loader, device) -> Tuple[float, float]:
+def compute_topk_accuracy(all_logits: torch.Tensor, all_labels: list, k: int) -> float:
+    """Compute top-k accuracy."""
+    _, topk_preds = torch.topk(all_logits, min(k, all_logits.size(1)), dim=-1)
+    topk_preds = topk_preds.cpu().numpy()
+    correct = 0
+    for true_label, pred_k in zip(all_labels, topk_preds):
+        if true_label in pred_k:
+            correct += 1
+    return correct / len(all_labels)
+
+
+def evaluate(model, loader, device) -> Tuple[dict, float]:
     model.eval()
-    all_preds, all_labels = [], []
+    all_logits = []
+    all_labels = []
     latencies = []
 
     with torch.no_grad():
@@ -333,13 +379,26 @@ def evaluate(model, loader, device) -> Tuple[float, float]:
             logits = model(ids, mask)
             latencies.append((time.perf_counter() - t0) * 1000)  # ms
 
-            preds = logits.argmax(dim=-1).cpu()
-            all_preds.extend(preds.tolist())
+            all_logits.append(logits.cpu())
             all_labels.extend(lbls.tolist())
 
-    acc = accuracy_score(all_labels, all_preds)
+    all_logits = torch.cat(all_logits, dim=0)
+    
+    # Compute top-k accuracies
+    acc_top1 = compute_topk_accuracy(all_logits, all_labels, 1)
+    acc_top3 = compute_topk_accuracy(all_logits, all_labels, 3)
+    acc_top5 = compute_topk_accuracy(all_logits, all_labels, 5)
+    acc_top10 = compute_topk_accuracy(all_logits, all_labels, 10)
+    
     avg_ms = np.mean(latencies)
-    return acc, avg_ms
+    
+    metrics = {
+        'top1': acc_top1,
+        'top3': acc_top3,
+        'top5': acc_top5,
+        'top10': acc_top10,
+    }
+    return metrics, avg_ms
 
 
 def peak_memory_mb(device) -> float:
@@ -358,11 +417,12 @@ def count_params(model) -> int:
 
 def run_benchmark(
     df: pd.DataFrame,
-    num_epochs: int = 3,
+    num_epochs: int = 10,
     batch_size: int = 16,
     max_length: int = 256,
     tome_r: int = 8,
     learning_rate: float = 2e-5,
+    early_stopping_patience: int = 3,
 ) -> Tuple[BenchmarkResult, BenchmarkResult]:
     """
     Trains and evaluates two models:
@@ -375,25 +435,53 @@ def run_benchmark(
     print(f"\nUsing device: {device}\n{'='*55}")
 
     # ── Preprocess ────────────────────────────────────────────
+    t_preprocess = time.perf_counter()
     df = load_and_preprocess(df)
     df = df.dropna(subset=["Label"])
 
-    le = LabelEncoder()
-    labels = le.fit_transform(df["Label"].astype(str))
-    num_labels = len(le.classes_)
-    print(f"Classes: {num_labels}  |  Samples: {len(df)}")
+    raw_labels = df["Label"].astype(str).tolist()
 
-    tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
-
-    X_train, X_test, y_train, y_test = train_test_split(
-        df["text"].tolist(), labels, test_size=0.2, random_state=42, stratify=labels
+    # Split BEFORE encoding to ensure stratification on raw labels and avoid losing classes due to stratify 
+    texts = df["text"].tolist()
+    (X_train, X_temp,
+     y_train_raw, y_temp_raw) = train_test_split(
+        texts, raw_labels,
+        test_size=0.4, random_state=42,
+        stratify=raw_labels          # stratify to keep the same distribution of classes in train/val/test
     )
+    (X_val, X_test,
+     y_val_raw, y_test_raw) = train_test_split(
+        X_temp, y_temp_raw,
+        test_size=0.5, random_state=42,
+        # stratify=y_temp_raw        
+    )
+    # Current rate: Train 60% | Val 20% | Test 20%
+    le = LabelEncoder()
+    y_train = le.fit_transform(y_train_raw)          # fit + transform
+    y_val   = le.transform(y_val_raw)                # transform only
+    y_test  = le.transform(y_test_raw)               # transform only
+    num_labels = len(le.classes_)
 
+    print(f"Classes: {num_labels} | Train: {len(y_train)} "
+          f"| Val: {len(y_val)} | Test: {len(y_test)}")
+    
+    t_tokenize = time.perf_counter()
+    tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+    print(f"  [Loaded tokenizer]: {time.perf_counter() - t_tokenize:.2f}s")
+
+    # ── Create Datasets ────────────────────────────────────────
+    t_dataset = time.perf_counter()
     train_ds = PaperDataset(X_train, y_train, tokenizer, max_length)
+    val_ds   = PaperDataset(X_val,   y_val,   tokenizer, max_length)
     test_ds  = PaperDataset(X_test,  y_test,  tokenizer, max_length)
-
+    print(f"  [Created datasets]: {time.perf_counter() - t_dataset:.2f}s")
+    
+    t_loader = time.perf_counter()
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
+    val_loader   = DataLoader(val_ds,   batch_size=batch_size)
     test_loader  = DataLoader(test_ds,  batch_size=batch_size)
+    print(f"  [Created dataloaders]: {time.perf_counter() - t_loader:.2f}s")
+    print(f"  Total preprocessing & data prep: {time.perf_counter() - t_preprocess:.2f}s\n")
 
     results = []
     for use_tome in [False, True]:
@@ -403,49 +491,132 @@ def run_benchmark(
         if device.type == "cuda":
             torch.cuda.reset_peak_memory_stats(device)
 
+        # ── Initialize Model ────────────────────────────────────
+        t_init = time.perf_counter()
         model = BertClassifier(num_labels, use_tome=use_tome, tome_r=tome_r).to(device)
         optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
         criterion = nn.CrossEntropyLoss()
+        t_init_ms = (time.perf_counter() - t_init) * 1000
+        print(f"  [Model initialized]: {t_init_ms:.2f}ms")
+        
+        total_train_time = 0
+        best_val_acc = 0
+        patience_counter = 0
+        best_epoch = 0
+        epochs_trained = 0
+        best_model_state = None
 
+        # ── Training Loop ────────────────────────────────────────
+        t_training_start = time.perf_counter()
         for epoch in range(num_epochs):
-            loss = train_one_epoch(model, train_loader, optimizer, criterion, device)
-            print(f"  Epoch {epoch+1}/{num_epochs}  loss={loss:.4f}")
+            # Reset ToMe timer
+            reset_tome_timer()
+            
+            loss, epoch_time = train_one_epoch(model, train_loader, optimizer, criterion, device)
+            total_train_time += epoch_time
+            epochs_trained += 1
+            
+            # Validation
+            t_eval = time.perf_counter()
+            val_metrics, _ = evaluate(model, val_loader, device)
+            eval_time_ms = (time.perf_counter() - t_eval) * 1000
+            val_acc = val_metrics['top1']
+            
+            # Get ToMe stats if using ToMe
+            tome_stats = get_tome_timer_stats()
+            tome_info = f"  ToMe merge: {tome_stats['total_ms']:.2f}ms ({tome_stats['call_count']} calls)" if tome_stats['call_count'] > 0 else ""
+            
+            print(f"  Epoch {epoch+1}/{num_epochs}  loss={loss:.4f}  train={epoch_time:.2f}s  eval={eval_time_ms:.2f}ms  val_acc={val_acc:.4f}{tome_info}", end="")
+            
+            # Early stopping
+            if val_acc > best_val_acc:
+                best_val_acc = val_acc
+                patience_counter = 0
+                best_epoch = epoch + 1
+                best_model_state = model.state_dict().copy()
+                print(" ✓")
+            else:
+                patience_counter += 1
+                print(f" (patience: {patience_counter}/{early_stopping_patience})")
+                if patience_counter >= early_stopping_patience:
+                    print(f"  Early stopping at epoch {epoch+1} (best epoch: {best_epoch})")
+                    break
 
-        acc, avg_ms = evaluate(model, test_loader, device)
+        t_training_end = time.perf_counter()
+        training_duration = t_training_end - t_training_start
+        print(f"  [Training completed]: {training_duration:.2f}s ({epochs_trained} epochs)")
+
+        # Load best model state before testing
+        if best_model_state is not None:
+            model.load_state_dict(best_model_state)
+
+        # ── Test Evaluation ────────────────────────────────────
+        t_test = time.perf_counter()
+        test_metrics, avg_ms = evaluate(model, test_loader, device)
+        test_duration = (time.perf_counter() - t_test) * 1000
+        print(f"  [Testing completed]: {test_duration:.2f}ms")
+        
         mem = peak_memory_mb(device)
         params = count_params(model)
 
         result = BenchmarkResult(
             mode=label,
-            accuracy=acc,
+            accuracy_top1=test_metrics['top1'],
+            accuracy_top3=test_metrics['top3'],
+            accuracy_top5=test_metrics['top5'],
+            accuracy_top10=test_metrics['top10'],
             avg_inference_ms=avg_ms,
             peak_memory_mb=mem,
             total_params=params,
+            epochs_trained=epochs_trained,
         )
         results.append(result)
-        print(f"  Accuracy : {acc:.4f}")
-        print(f"  Avg batch inference: {avg_ms:.2f} ms")
-        print(f"  Peak GPU memory: {mem:.1f} MB")
+        
+        print(f"\n  Test Results:")
+        print(f"    Top-1  Accuracy: {test_metrics['top1']:.4f}")
+        print(f"    Top-3  Accuracy: {test_metrics['top3']:.4f}")
+        print(f"    Top-5  Accuracy: {test_metrics['top5']:.4f}")
+        print(f"    Top-10 Accuracy: {test_metrics['top10']:.4f}")
+        print(f"    Avg batch inference: {avg_ms:.2f} ms")
+        print(f"    Peak GPU memory: {mem:.1f} MB")
+        print(f"    Total training time: {total_train_time:.2f}s")
+        print(f"    Epochs trained: {epochs_trained}/{num_epochs}")
 
     return results[0], results[1]
 
 
 def print_comparison(baseline: BenchmarkResult, tome: BenchmarkResult):
     speedup  = baseline.avg_inference_ms / (tome.avg_inference_ms + 1e-9)
-    acc_diff = (tome.accuracy - baseline.accuracy) * 100
 
-    print("\n" + "=" * 55)
-    print("  COMPARISON SUMMARY")
-    print("=" * 55)
-    print(f"{'Metric':<28} {'Baseline':>10} {'ToMe':>10}")
-    print("-" * 55)
-    print(f"{'Accuracy':<28} {baseline.accuracy:>10.4f} {tome.accuracy:>10.4f}")
-    print(f"{'Avg Inference (ms)':<28} {baseline.avg_inference_ms:>10.2f} {tome.avg_inference_ms:>10.2f}")
-    print(f"{'Peak GPU Memory (MB)':<28} {baseline.peak_memory_mb:>10.1f} {tome.peak_memory_mb:>10.1f}")
-    print("-" * 55)
-    print(f"  Speed-up factor   : {speedup:.2f}×")
-    print(f"  Accuracy Δ        : {acc_diff:+.2f}%")
-    print("=" * 55)
+    print("\n" + "=" * 75)
+    print("  COMPARISON SUMMARY - TOP-K ACCURACY TABLE")
+    print("=" * 75)
+    print(f"{'Metric':<25} {'Baseline':>15} {'ToMe':>15} {'Δ':>15}")
+    print("-" * 75)
+    
+    # Top-1
+    delta_top1 = (tome.accuracy_top1 - baseline.accuracy_top1) * 100
+    print(f"{'Top-1 Accuracy':<25} {baseline.accuracy_top1:>15.4f} {tome.accuracy_top1:>15.4f} {delta_top1:>14.2f}%")
+    
+    # Top-3
+    delta_top3 = (tome.accuracy_top3 - baseline.accuracy_top3) * 100
+    print(f"{'Top-3 Accuracy':<25} {baseline.accuracy_top3:>15.4f} {tome.accuracy_top3:>15.4f} {delta_top3:>14.2f}%")
+    
+    # Top-5
+    delta_top5 = (tome.accuracy_top5 - baseline.accuracy_top5) * 100
+    print(f"{'Top-5 Accuracy':<25} {baseline.accuracy_top5:>15.4f} {tome.accuracy_top5:>15.4f} {delta_top5:>14.2f}%")
+    
+    # Top-10
+    delta_top10 = (tome.accuracy_top10 - baseline.accuracy_top10) * 100
+    print(f"{'Top-10 Accuracy':<25} {baseline.accuracy_top10:>15.4f} {tome.accuracy_top10:>15.4f} {delta_top10:>14.2f}%")
+    
+    print("-" * 75)
+    print(f"{'Avg Inference (ms)':<25} {baseline.avg_inference_ms:>15.2f} {tome.avg_inference_ms:>15.2f} {(tome.avg_inference_ms - baseline.avg_inference_ms):>14.2f}")
+    print(f"{'Peak GPU Memory (MB)':<25} {baseline.peak_memory_mb:>15.1f} {tome.peak_memory_mb:>15.1f} {(tome.peak_memory_mb - baseline.peak_memory_mb):>14.1f}")
+    print(f"{'Epochs Trained':<25} {baseline.epochs_trained:>15} {tome.epochs_trained:>15}")
+    print("-" * 75)
+    print(f"  Speed-up factor: {speedup:.2f}×")
+    print("=" * 75)
 
 
 # ─────────────────────────────────────────────
@@ -454,18 +625,32 @@ def print_comparison(baseline: BenchmarkResult, tome: BenchmarkResult):
 
 if __name__ == "__main__":
     import pandas as pd
-    train = pd.read_csv("D:\\File\\train_dataset\\train_set.csv")
-    train_filter = train[(train["Label"] == 1) | (train["Label"] == 0)] # 636 + 729 + 516
-    #print(train_filter.shape)
-    samples = train_filter.sample(1000)
-    df = pd.DataFrame(samples)
+    script_start = time.perf_counter()
+    
+    train = pd.read_csv("C:\\Users\\Admin\\Downloads\\New folder\\data\\train_set.csv")
+
+    # Lấy top journals + sample từ top labels + random từ tail + combine
+    top_labels   = train["Label"].value_counts().nlargest(10).index.tolist()
+    top_samples  = (train[train["Label"].isin(top_labels)]
+                    .groupby("Label")
+                    .sample(300, random_state=42))
+    tail_samples = (train[~train["Label"].isin(top_labels)]
+                    .sample(300, random_state=42))
+    df = pd.concat([top_samples, tail_samples]).reset_index(drop=True)
+    
 
     baseline, tome = run_benchmark(
         df,
-        num_epochs=3,     # ↑ for real training
+        num_epochs=10,     # Early stopping sẽ tự dừng khi không cải thiện
         batch_size=8,
-        max_length=128,   # ↑ to 256/512 for full abstracts
-        tome_r=8,         # tokens merged per layer; try 4, 8, 16
+        max_length=128,    # ↑ to 256/512 for full abstracts
+        tome_r=8,          # tokens merged per layer; try 4, 8, 16
+        early_stopping_patience=3,
     )
 
     print_comparison(baseline, tome)
+    
+    total_time = time.perf_counter() - script_start
+    print(f"\n{'='*55}")
+    print(f"  TOTAL SCRIPT EXECUTION TIME: {total_time:.2f}s ({total_time/60:.2f} min)")
+    print(f"{'='*55}")
