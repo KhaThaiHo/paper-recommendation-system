@@ -27,7 +27,6 @@ from torch import Tensor
 from typing import Optional, Tuple, Callable
 from dataclasses import dataclass
 from sklearn.preprocessing import LabelEncoder
-from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, accuracy_score
 from transformers import BertTokenizer, BertModel, BertConfig
 from torch.utils.data import Dataset, DataLoader
@@ -49,6 +48,37 @@ def load_and_preprocess(df: pd.DataFrame) -> pd.DataFrame:
         df["Keywords"]
     )
     return df
+
+
+def preprocess_split(df: pd.DataFrame, split_name: str) -> pd.DataFrame:
+    """Preprocess one split and validate required labels are present."""
+    split_df = load_and_preprocess(df)
+    split_df = split_df.dropna(subset=["Label"]).reset_index(drop=True)
+    if split_df.empty:
+        raise ValueError(f"{split_name} split is empty after preprocessing.")
+    return split_df
+
+
+def encode_split_labels(
+    split_df: pd.DataFrame,
+    label_to_id: dict,
+    split_name: str,
+) -> Tuple[list, list]:
+    """Map labels using training-label vocabulary and drop unseen labels."""
+    raw_labels = split_df["Label"].astype(str)
+    known_mask = raw_labels.isin(label_to_id)
+    dropped_count = int((~known_mask).sum())
+
+    if dropped_count > 0:
+        print(f"[Warning] Dropping {dropped_count} samples in {split_name} split with unseen labels.")
+
+    filtered_df = split_df[known_mask].reset_index(drop=True)
+    if filtered_df.empty:
+        raise ValueError(f"{split_name} split has no samples with labels seen in training split.")
+
+    encoded_labels = raw_labels[known_mask].map(label_to_id).astype(int).tolist()
+    texts = filtered_df["text"].tolist()
+    return texts, encoded_labels
 
 
 class PaperDataset(Dataset):
@@ -416,7 +446,9 @@ def count_params(model) -> int:
 # ─────────────────────────────────────────────
 
 def run_benchmark(
-    df: pd.DataFrame,
+    train_df: pd.DataFrame,
+    val_df: pd.DataFrame,
+    test_df: pd.DataFrame,
     num_epochs: int = 10,
     batch_size: int = 16,
     max_length: int = 256,
@@ -436,30 +468,18 @@ def run_benchmark(
 
     # ── Preprocess ────────────────────────────────────────────
     t_preprocess = time.perf_counter()
-    df = load_and_preprocess(df)
-    df = df.dropna(subset=["Label"])
+    train_df = preprocess_split(train_df, "train")
+    val_df = preprocess_split(val_df, "validation")
+    test_df = preprocess_split(test_df, "test")
 
-    raw_labels = df["Label"].astype(str).tolist()
-
-    # Split BEFORE encoding to ensure stratification on raw labels and avoid losing classes due to stratify 
-    texts = df["text"].tolist()
-    (X_train, X_temp,
-     y_train_raw, y_temp_raw) = train_test_split(
-        texts, raw_labels,
-        test_size=0.4, random_state=42,
-        stratify=raw_labels          # stratify to keep the same distribution of classes in train/val/test
-    )
-    (X_val, X_test,
-     y_val_raw, y_test_raw) = train_test_split(
-        X_temp, y_temp_raw,
-        test_size=0.5, random_state=42,
-        # stratify=y_temp_raw        
-    )
-    # Current rate: Train 60% | Val 20% | Test 20%
     le = LabelEncoder()
-    y_train = le.fit_transform(y_train_raw)          # fit + transform
-    y_val   = le.transform(y_val_raw)                # transform only
-    y_test  = le.transform(y_test_raw)               # transform only
+    le.fit(train_df["Label"].astype(str))
+    label_to_id = {label: idx for idx, label in enumerate(le.classes_)}
+
+    X_train, y_train = encode_split_labels(train_df, label_to_id, "train")
+    X_val, y_val = encode_split_labels(val_df, label_to_id, "validation")
+    X_test, y_test = encode_split_labels(test_df, label_to_id, "test")
+
     num_labels = len(le.classes_)
 
     print(f"Classes: {num_labels} | Train: {len(y_train)} "
@@ -624,28 +644,34 @@ def print_comparison(baseline: BenchmarkResult, tome: BenchmarkResult):
 # ─────────────────────────────────────────────
 
 if __name__ == "__main__":
+    import argparse
     import pandas as pd
     script_start = time.perf_counter()
-    
-    train = pd.read_csv("C:\\Users\\Admin\\Downloads\\New folder\\data\\train_set.csv")
 
-    # Lấy top journals + sample từ top labels + random từ tail + combine
-    top_labels   = train["Label"].value_counts().nlargest(10).index.tolist()
-    top_samples  = (train[train["Label"].isin(top_labels)]
-                    .groupby("Label")
-                    .sample(300, random_state=42))
-    tail_samples = (train[~train["Label"].isin(top_labels)]
-                    .sample(300, random_state=42))
-    df = pd.concat([top_samples, tail_samples]).reset_index(drop=True)
-    
+    parser = argparse.ArgumentParser(description="Benchmark BERT with or without ToMe using fixed data splits.")
+    parser.add_argument("--train_csv", default="train_dataset.csv", help="Path to training CSV file")
+    parser.add_argument("--val_csv", default="val_dataset.csv", help="Path to validation CSV file")
+    parser.add_argument("--test_csv", default="test_dataset.csv", help="Path to test CSV file")
+    parser.add_argument("--num_epochs", type=int, default=10)
+    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--max_length", type=int, default=128)
+    parser.add_argument("--tome_r", type=int, default=8)
+    parser.add_argument("--early_stopping_patience", type=int, default=3)
+    args = parser.parse_args()
+
+    train_df = pd.read_csv(args.train_csv)
+    val_df = pd.read_csv(args.val_csv)
+    test_df = pd.read_csv(args.test_csv)
 
     baseline, tome = run_benchmark(
-        df,
-        num_epochs=10,     # Early stopping sẽ tự dừng khi không cải thiện
-        batch_size=8,
-        max_length=128,    # ↑ to 256/512 for full abstracts
-        tome_r=8,          # tokens merged per layer; try 4, 8, 16
-        early_stopping_patience=3,
+        train_df=train_df,
+        val_df=val_df,
+        test_df=test_df,
+        num_epochs=args.num_epochs,
+        batch_size=args.batch_size,
+        max_length=args.max_length,
+        tome_r=args.tome_r,
+        early_stopping_patience=args.early_stopping_patience,
     )
 
     print_comparison(baseline, tome)

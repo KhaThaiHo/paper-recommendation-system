@@ -1,71 +1,132 @@
 # Paper Submission Recommendation
 
-This project benchmarks academic paper classification with BERT/BioBERT, comparing:
-- Standard BERT (without Token Merging)
-- BERT + ToMe (Token Merging)
+This project trains and benchmarks journal classification with:
+- Standard BERT (`ToMe OFF`)
+- BERT + Token Merging (`ToMe ON`)
+
+The main entrypoint is `main.py`.
 
 ## 1) Requirements
 
-- Windows 10/11 (the current project setup is on Windows)
-- Python 3.10+ (3.10 or 3.11 recommended)
-- Latest pip
+- Windows 10/11
+- Python 3.10+
+- `pip`
 
 ## 2) Environment Setup
 
-Create Virtual Environment:
+Create and activate a virtual environment, then install dependencies:
 
 ```powershell
 python -m venv .venv
-```
-
-Activate the venv:
-
-```powershell
 .\.venv\Scripts\Activate.ps1
-```
-
-Download the dependencies:
-
-```powershell
 pip install -r requirements.txt
 ```
 
-## 3) Prepare the Dataset
+## 3) Required Input Files
 
-In the current scripts, the dataset is loaded from:
+You must provide 4 CSV files:
+1. train split (`--train_path`)
+2. validation split (`--val_path`)
+3. test split (`--test_path`)
+4. journal metadata (`--journal_path`)
 
-`D:\File\train_dataset\train_set.csv`
+### 3.1 Train/Val/Test columns
 
-The CSV file must contain at least these columns:
-- `Title`
-- `Abstract`
-- `Keywords`
-- `Label`
+Required:
+- `Label` (or your custom `--label_col`)
 
-If your dataset is in a different path, update the `pd.read_csv(...)` line in the corresponding script.
+Optional, depending on `--text_combination`:
+- `Title` (`T`)
+- `Abstract` (`A`)
+- `Keywords` (`K`)
 
-## 4) Run the Project
+### 3.2 Journal columns
 
-### Run BERT + ToMe benchmark
+Required:
+- Join label column (default `Categories`, configurable via `--journal_label_col`)
+- Category text column (default `Categories`, configurable via `--journal_category_col`)
+
+Scope/Aims column:
+- By default, `Aims` is used when `S` is selected in `--text_combination`.
+- You can override with `--journal_scope_col`.
+
+## 4) Preprocessing Behavior (Current)
+
+Preprocessing always does these steps:
+1. Load train/val/test CSVs.
+2. Load journal CSV.
+3. Join each split with journal data by label.
+4. Build `text` field from selected feature codes in `--text_combination`.
+
+Feature code mapping:
+- `T` = `Title`
+- `A` = `Abstract`
+- `K` = `Keywords`
+- `C` = journal categories field (`journal_categories`)
+- `S` = journal scope/aims field (`journal_scope_aims`)
+
+Examples:
+- `TAK` -> Title + Abstract + Keywords
+- `CS` -> Journal Categories + Scope/Aims
+- `TAKCS` -> All fields combined
+
+## 5) Run Command (Exact)
+
+Use this command format (PowerShell):
 
 ```powershell
-python ToMe_Bert_Classify.py
+python main.py `
+  --train_path "D:\File\data\train.csv" `
+  --val_path "D:\File\data\val.csv" `
+  --test_path "D:\File\data\test.csv" `
+  --journal_path "D:\File\data\journal.csv" `
+  --text_combination "TAKCS" `
+  --label_col "Label" `
+  --journal_label_col "Categories" `
+  --journal_category_col "Categories" `
+  --journal_scope_col "Aims" `
+  --num_epochs 20 `
+  --batch_size 8 `
+  --max_length 128 `
+  --tome_r 8 `
+  --learning_rate 2e-5 `
+  --early_stopping_patience 3 `
+  --checkpoint_dir "./checkpoints"
 ```
 
-### Run BioBERT + ToMe benchmark
+Or on one line:
 
 ```powershell
-python test_claude_biobert.py
+python main.py --train_path "D:\File\data\train.csv" --val_path "D:\File\data\val.csv" --test_path "D:\File\data\test.csv" --journal_path "D:\File\data\journal.csv" --text_combination "TAKCS" --label_col "Label" --journal_label_col "Categories" --journal_category_col "Categories" --journal_scope_col "Aims" --num_epochs 20 --batch_size 8 --max_length 128 --tome_r 8 --learning_rate 2e-5 --early_stopping_patience 3 --checkpoint_dir "./checkpoints"
 ```
 
-After execution, the console will print:
-- Accuracy
+Notes:
+- `--journal_path` is required.
+- The run executes both `ToMe OFF` and `ToMe ON` sequentially.
+
+## 6) What You Will See
+
+Console output includes:
+- Dataset/preprocessing summary
+- Epoch-wise training + validation logs
+- Test metrics (`Top-1/3/5/10`)
 - Average inference time
-- Peak GPU memory (neu co CUDA)
-- Comparison between ToMe OFF and ToMe ON
+- Peak GPU memory (if CUDA is available)
+- Final comparison table (`ToMe OFF` vs `ToMe ON`)
 
-## 5) Quick Notes
+## 7) Checkpoints
 
+Saved in `--checkpoint_dir`:
+- `ToMe_OFF_last.pt`, `ToMe_OFF_best.pt`
+- `ToMe_ON_last.pt`, `ToMe_ON_best.pt`
 
-- The notebooks (`test.ipynb`, `test_claude.ipynb`) can be used for interactive experiments.
-- If no GPU is available, the scripts will still run on CPU but more slowly.
+## 8) Quick Troubleshooting
+
+- Error: missing column in split CSV
+	- Ensure selected `--text_combination` columns exist in train/val/test.
+
+- Error: missing journal columns
+	- Verify `--journal_label_col`, `--journal_category_col`, and `--journal_scope_col` names.
+
+- No GPU
+	- Training still runs on CPU, but slower.
