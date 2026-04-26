@@ -12,7 +12,7 @@ class BenchmarkResult:
 	accuracy_top3: float
 	accuracy_top5: float
 	accuracy_top10: float
-	avg_inference_ms: float
+	avg_inference_s: float
 	peak_memory_mb: float
 	total_params: int
 	epochs_trained: int
@@ -38,13 +38,13 @@ def print_comparison(baseline: BenchmarkResult, tome: Optional[BenchmarkResult])
 		print(f"Top-3 Accuracy:  {baseline.accuracy_top3:.4f}")
 		print(f"Top-5 Accuracy:  {baseline.accuracy_top5:.4f}")
 		print(f"Top-10 Accuracy: {baseline.accuracy_top10:.4f}")
-		print(f"Avg Inference (ms): {baseline.avg_inference_ms:.2f}")
+		print(f"Avg Inference (s): {baseline.avg_inference_s:.2f}")
 		print(f"Peak GPU Memory (MB): {baseline.peak_memory_mb:.1f}")
 		print(f"Epochs Trained: {baseline.epochs_trained}")
 		print("=" * 75)
 		return
 
-	speedup = baseline.avg_inference_ms / (tome.avg_inference_ms + 1e-9)
+	speedup = baseline.avg_inference_s / (tome.avg_inference_s + 1e-9)
 
 	print("\n" + "=" * 75)
 	print("  COMPARISON SUMMARY - TOP-K ACCURACY TABLE")
@@ -63,10 +63,10 @@ def print_comparison(baseline: BenchmarkResult, tome: Optional[BenchmarkResult])
 	print(f"{'Top-10 Accuracy':<25} {baseline.accuracy_top10:>15.4f} {tome.accuracy_top10:>15.4f} {delta_top10:>14.2f}%")
 	print("-" * 75)
 	print(
-		f"{'Avg Inference (ms)':<25} "
-		f"{baseline.avg_inference_ms:>15.2f} "
-		f"{tome.avg_inference_ms:>15.2f} "
-		f"{(tome.avg_inference_ms - baseline.avg_inference_ms):>14.2f}"
+		f"{'Avg Inference (s)':<25} "
+		f"{baseline.avg_inference_s:>15.2f} "
+		f"{tome.avg_inference_s:>15.2f} "
+		f"{(tome.avg_inference_s - baseline.avg_inference_s):>14.2f}"
 	)
 	print(
 		f"{'Peak GPU Memory (MB)':<25} "

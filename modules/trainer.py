@@ -63,7 +63,7 @@ def evaluate(model, loader, device) -> tuple[dict, float]:
 
             t0 = time.perf_counter()
             logits = model(ids, mask)
-            latencies.append((time.perf_counter() - t0) * 1000)
+            latencies.append(time.perf_counter() - t0)
 
             all_logits.append(logits.cpu())
             all_labels.extend(labels.tolist())
@@ -183,8 +183,8 @@ def run_benchmark(
             best_val_acc = checkpoint["best_val_acc"]
             patience_counter = checkpoint["patience_counter"]
 
-        t_init_ms = (time.perf_counter() - t_init) * 1000
-        print(f"  [Model initialized]: {t_init_ms:.2f}ms")
+        t_init_s = time.perf_counter() - t_init
+        print(f"  [Model initialized]: {t_init_s:.2f}s")
 
         total_train_time = 0.0
         epochs_trained = 0
@@ -200,14 +200,14 @@ def run_benchmark(
 
             t_eval = time.perf_counter()
             val_metrics, _ = evaluate(model, val_loader, device)
-            eval_time_ms = (time.perf_counter() - t_eval) * 1000
+            eval_time_s = time.perf_counter() - t_eval
             val_acc = val_metrics["top1"]
 
             tome_stats = get_tome_timer_stats()
             tome_info = ""
             if tome_stats["call_count"] > 0:
                 tome_info = (
-                    f"  ToMe merge: {tome_stats['total_ms']:.2f}ms "
+                    f"  ToMe merge: {tome_stats['total_s']:.2f}s "
                     f"({tome_stats['call_count']} calls)"
                 )
 
@@ -215,7 +215,7 @@ def run_benchmark(
                 f"  Epoch {epoch + 1}/{num_epochs}  "
                 f"loss={loss:.4f}  "
                 f"train={epoch_time:.2f}s  "
-                f"eval={eval_time_ms:.2f}ms  "
+                f"eval={eval_time_s:.2f}s  "
                 f"val_acc={val_acc:.4f}{tome_info}",
                 end="",
             )
@@ -259,9 +259,9 @@ def run_benchmark(
             model.load_state_dict(checkpoint["model_state_dict"])
 
         t_test = time.perf_counter()
-        test_metrics, avg_ms = evaluate(model, test_loader, device)
-        test_duration_ms = (time.perf_counter() - t_test) * 1000
-        print(f"  [Testing completed]: {test_duration_ms:.2f}ms")
+        test_metrics, avg_s = evaluate(model, test_loader, device)
+        test_duration_s = time.perf_counter() - t_test
+        print(f"  [Testing completed]: {test_duration_s:.2f}s")
 
         result = BenchmarkResult(
             mode=mode_name,
@@ -269,7 +269,7 @@ def run_benchmark(
             accuracy_top3=test_metrics["top3"],
             accuracy_top5=test_metrics["top5"],
             accuracy_top10=test_metrics["top10"],
-            avg_inference_ms=avg_ms,
+            avg_inference_s=avg_s,
             peak_memory_mb=peak_memory_mb(device),
             total_params=count_params(model),
             epochs_trained=epochs_trained,
@@ -281,7 +281,7 @@ def run_benchmark(
         print(f"    Top-3  Accuracy: {test_metrics['top3']:.4f}")
         print(f"    Top-5  Accuracy: {test_metrics['top5']:.4f}")
         print(f"    Top-10 Accuracy: {test_metrics['top10']:.4f}")
-        print(f"    Avg batch inference: {avg_ms:.2f} ms")
+        print(f"    Avg batch inference: {avg_s:.2f} s")
         print(f"    Peak GPU memory: {peak_memory_mb(device):.1f} MB")
         print(f"    Total training time: {total_train_time:.2f}s")
         print(f"    Epochs trained: {epochs_trained}/{num_epochs}")

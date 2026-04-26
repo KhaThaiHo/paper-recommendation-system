@@ -7,12 +7,12 @@ from typing import Callable, Tuple
 import torch
 
 
-TOME_MERGE_TIME = {"total_ms": 0.0, "call_count": 0}
+TOME_MERGE_TIME = {"total_s": 0.0, "call_count": 0}
 
 
 def reset_tome_timer() -> None:
     global TOME_MERGE_TIME
-    TOME_MERGE_TIME = {"total_ms": 0.0, "call_count": 0}
+    TOME_MERGE_TIME = {"total_s": 0.0, "call_count": 0}
 
 
 def get_tome_timer_stats() -> dict:
@@ -97,8 +97,8 @@ class ToMeBertAttention(nn.Module):
             residual = merge_fn(residual)               # (B, T', C)
             
             t_merge_end = time.perf_counter()
-            merge_time_ms = (t_merge_end - t_merge_start) * 1000
-            TOME_MERGE_TIME["total_ms"] += merge_time_ms
+            merge_time_s = t_merge_end - t_merge_start
+            TOME_MERGE_TIME["total_s"] += merge_time_s
             TOME_MERGE_TIME["call_count"] += 1
         # ────────────────────────────────────────────────────────────────
 

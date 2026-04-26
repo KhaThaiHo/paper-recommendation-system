@@ -184,12 +184,12 @@ def bipartite_soft_matching(
 # ─────────────────────────────────────────────
 
 # Variable to track total ToMe merge time across all calls for reporting after each epoch
-TOME_MERGE_TIME = {"total_ms": 0.0, "call_count": 0}
+TOME_MERGE_TIME = {"total_s": 0.0, "call_count": 0}
 
 def reset_tome_timer():
     """Reset the ToMe merge timing counters."""
     global TOME_MERGE_TIME
-    TOME_MERGE_TIME = {"total_ms": 0.0, "call_count": 0}
+    TOME_MERGE_TIME = {"total_s": 0.0, "call_count": 0}
 
 def get_tome_timer_stats():
     """Get ToMe merge timing statistics."""
@@ -275,8 +275,8 @@ class ToMeBertAttention(nn.Module):
             residual = merge_fn(residual)               # (B, T', C)
             
             t_merge_end = time.perf_counter()
-            merge_time_ms = (t_merge_end - t_merge_start) * 1000
-            TOME_MERGE_TIME["total_ms"] += merge_time_ms
+            merge_time_s = t_merge_end - t_merge_start
+            TOME_MERGE_TIME["total_s"] += merge_time_s
             TOME_MERGE_TIME["call_count"] += 1
         # ────────────────────────────────────────────────────────────────
 
@@ -355,7 +355,7 @@ class BenchmarkResult:
     accuracy_top3: float
     accuracy_top5: float
     accuracy_top10: float
-    avg_inference_ms: float
+    avg_inference_s: float
     peak_memory_mb: float
     total_params: int
     epochs_trained: int
@@ -407,7 +407,7 @@ def evaluate(model, loader, device) -> Tuple[dict, float]:
 
             t0 = time.perf_counter()
             logits = model(ids, mask)
-            latencies.append((time.perf_counter() - t0) * 1000)  # ms
+            latencies.append(time.perf_counter() - t0)
 
             all_logits.append(logits.cpu())
             all_labels.extend(lbls.tolist())
@@ -420,7 +420,7 @@ def evaluate(model, loader, device) -> Tuple[dict, float]:
     acc_top5 = compute_topk_accuracy(all_logits, all_labels, 5)
     acc_top10 = compute_topk_accuracy(all_logits, all_labels, 10)
     
-    avg_ms = np.mean(latencies)
+    avg_s = np.mean(latencies)
     
     metrics = {
         'top1': acc_top1,
@@ -428,7 +428,7 @@ def evaluate(model, loader, device) -> Tuple[dict, float]:
         'top5': acc_top5,
         'top10': acc_top10,
     }
-    return metrics, avg_ms
+    return metrics, avg_s
 
 
 def peak_memory_mb(device) -> float:
@@ -516,8 +516,8 @@ def run_benchmark(
         model = BertClassifier(num_labels, use_tome=use_tome, tome_r=tome_r).to(device)
         optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
         criterion = nn.CrossEntropyLoss()
-        t_init_ms = (time.perf_counter() - t_init) * 1000
-        print(f"  [Model initialized]: {t_init_ms:.2f}ms")
+        t_init_s = time.perf_counter() - t_init
+        print(f"  [Model initialized]: {t_init_s:.2f}s")
         
         total_train_time = 0
         best_val_acc = 0
@@ -539,14 +539,14 @@ def run_benchmark(
             # Validation
             t_eval = time.perf_counter()
             val_metrics, _ = evaluate(model, val_loader, device)
-            eval_time_ms = (time.perf_counter() - t_eval) * 1000
+            eval_time_s = time.perf_counter() - t_eval
             val_acc = val_metrics['top1']
             
             # Get ToMe stats if using ToMe
             tome_stats = get_tome_timer_stats()
-            tome_info = f"  ToMe merge: {tome_stats['total_ms']:.2f}ms ({tome_stats['call_count']} calls)" if tome_stats['call_count'] > 0 else ""
+            tome_info = f"  ToMe merge: {tome_stats['total_s']:.2f}s ({tome_stats['call_count']} calls)" if tome_stats['call_count'] > 0 else ""
             
-            print(f"  Epoch {epoch+1}/{num_epochs}  loss={loss:.4f}  train={epoch_time:.2f}s  eval={eval_time_ms:.2f}ms  val_acc={val_acc:.4f}{tome_info}", end="")
+            print(f"  Epoch {epoch+1}/{num_epochs}  loss={loss:.4f}  train={epoch_time:.2f}s  eval={eval_time_s:.2f}s  val_acc={val_acc:.4f}{tome_info}", end="")
             
             # Early stopping
             if val_acc > best_val_acc:
@@ -572,9 +572,9 @@ def run_benchmark(
 
         # ── Test Evaluation ────────────────────────────────────
         t_test = time.perf_counter()
-        test_metrics, avg_ms = evaluate(model, test_loader, device)
-        test_duration = (time.perf_counter() - t_test) * 1000
-        print(f"  [Testing completed]: {test_duration:.2f}ms")
+        test_metrics, avg_s = evaluate(model, test_loader, device)
+        test_duration = time.perf_counter() - t_test
+        print(f"  [Testing completed]: {test_duration:.2f}s")
         
         mem = peak_memory_mb(device)
         params = count_params(model)
@@ -585,7 +585,7 @@ def run_benchmark(
             accuracy_top3=test_metrics['top3'],
             accuracy_top5=test_metrics['top5'],
             accuracy_top10=test_metrics['top10'],
-            avg_inference_ms=avg_ms,
+            avg_inference_s=avg_s,
             peak_memory_mb=mem,
             total_params=params,
             epochs_trained=epochs_trained,
@@ -597,7 +597,7 @@ def run_benchmark(
         print(f"    Top-3  Accuracy: {test_metrics['top3']:.4f}")
         print(f"    Top-5  Accuracy: {test_metrics['top5']:.4f}")
         print(f"    Top-10 Accuracy: {test_metrics['top10']:.4f}")
-        print(f"    Avg batch inference: {avg_ms:.2f} ms")
+        print(f"    Avg batch inference: {avg_s:.2f} s")
         print(f"    Peak GPU memory: {mem:.1f} MB")
         print(f"    Total training time: {total_train_time:.2f}s")
         print(f"    Epochs trained: {epochs_trained}/{num_epochs}")
@@ -606,7 +606,7 @@ def run_benchmark(
 
 
 def print_comparison(baseline: BenchmarkResult, tome: BenchmarkResult):
-    speedup  = baseline.avg_inference_ms / (tome.avg_inference_ms + 1e-9)
+    speedup  = baseline.avg_inference_s / (tome.avg_inference_s + 1e-9)
 
     print("\n" + "=" * 75)
     print("  COMPARISON SUMMARY - TOP-K ACCURACY TABLE")
@@ -631,7 +631,7 @@ def print_comparison(baseline: BenchmarkResult, tome: BenchmarkResult):
     print(f"{'Top-10 Accuracy':<25} {baseline.accuracy_top10:>15.4f} {tome.accuracy_top10:>15.4f} {delta_top10:>14.2f}%")
     
     print("-" * 75)
-    print(f"{'Avg Inference (ms)':<25} {baseline.avg_inference_ms:>15.2f} {tome.avg_inference_ms:>15.2f} {(tome.avg_inference_ms - baseline.avg_inference_ms):>14.2f}")
+    print(f"{'Avg Inference (s)':<25} {baseline.avg_inference_s:>15.2f} {tome.avg_inference_s:>15.2f} {(tome.avg_inference_s - baseline.avg_inference_s):>14.2f}")
     print(f"{'Peak GPU Memory (MB)':<25} {baseline.peak_memory_mb:>15.1f} {tome.peak_memory_mb:>15.1f} {(tome.peak_memory_mb - baseline.peak_memory_mb):>14.1f}")
     print(f"{'Epochs Trained':<25} {baseline.epochs_trained:>15} {tome.epochs_trained:>15}")
     print("-" * 75)
