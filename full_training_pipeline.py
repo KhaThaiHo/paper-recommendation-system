@@ -216,24 +216,27 @@ def encode_split_labels(
 
 
 class PaperDataset(Dataset):
-    def __init__(self, texts, labels, tokenizer, max_length: int = 256):
-        self.encodings = tokenizer(
-            texts,
-            padding="max_length",
-            truncation=True,
-            max_length=max_length,
-            return_tensors="pt",
-        )
-        self.labels = torch.tensor(labels, dtype=torch.long)
+    def __init__(self, texts, labels, tokenizer, max_length=256):
+        self.texts = texts
+        self.labels = labels
+        self.tokenizer = tokenizer
+        self.max_length = max_length
 
     def __len__(self):
         return len(self.labels)
 
     def __getitem__(self, idx):
+        encoding = self.tokenizer(
+            self.texts,
+            padding = "max_length",
+            truncation = True,
+            max_length = self.max_length,
+            return_tensors = "pt"
+        )
         return {
-            "input_ids":      self.encodings["input_ids"][idx],
-            "attention_mask": self.encodings["attention_mask"][idx],
-            "labels":         self.labels[idx],
+            "input_ids":      encoding["input_ids"].squeeze(0),
+            "attention_mask": encoding["attention_mask"].squeeze(0),
+            "labels":         torch.tensor(self.labels[idx], dtype = torch.long),
         }
 
 
@@ -650,17 +653,27 @@ def run_benchmark(
 
     # ── Preprocess ──────────────────────────────────────────────────────
     t_preprocess = time.perf_counter()
+    print(f"Starting preprocess train set...")
     train_df = preprocess_split(train_df, "train",      fields, journal_df)
+    print(f"Trainset preprocessed completedly")
+
+    print(f"Starting preprocess validation set...")
     val_df   = preprocess_split(val_df,   "validation", fields, journal_df)
+    print(f"Validation set preprocessed completedly")
+
+    print(f"Starting preprocess testset...")
     test_df  = preprocess_split(test_df,  "test",       fields, journal_df)
+    print(f"Test set preprocessed completedly")
 
     le = LabelEncoder()
     le.fit(train_df["Label"].astype(str))
     label_to_id = {label: idx for idx, label in enumerate(le.classes_)}
 
+    print(f"Start encoding and spliting...")
     X_train, y_train = encode_split_labels(train_df, label_to_id, "train")
     X_val,   y_val   = encode_split_labels(val_df,   label_to_id, "validation")
     X_test,  y_test  = encode_split_labels(test_df,  label_to_id, "test")
+    print(f"Encoding and splitting completed.")
 
     num_labels = len(le.classes_)
     print(f"Classes: {num_labels} | Train: {len(y_train)} "
@@ -672,12 +685,22 @@ def run_benchmark(
 
     # ── Datasets & Loaders ──────────────────────────────────────────────
     t_ds = time.perf_counter()
+    print(f"Starting tokenize train set...")
     train_ds = PaperDataset(X_train, y_train, tokenizer, max_length)
+    print(f"Tokenize train set completed.")
+
+    print(f"Starting tokenize validation set...")
     val_ds   = PaperDataset(X_val,   y_val,   tokenizer, max_length)
+    print(f"Tokenize validation set completed.")
+
+    print(f"Starting tokenize test set...")
     test_ds  = PaperDataset(X_test,  y_test,  tokenizer, max_length)
+    print(f"Tokenize test set completed.")
+
     print(f"  [Created datasets]: {time.perf_counter() - t_ds:.2f}s")
 
     t_dl = time.perf_counter()
+    print(f"Starting to load datasets to DataLoader with batch_size: {batch_size}...")
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
     val_loader   = DataLoader(val_ds,   batch_size=batch_size)
     test_loader  = DataLoader(test_ds,  batch_size=batch_size)
@@ -707,14 +730,18 @@ def run_benchmark(
 
         for epoch in range(num_epochs):
             reset_tome_timer()
+            print(f"Starting training epoch {epoch+1}...")
             loss, epoch_time = train_one_epoch(model, train_loader, optimizer, criterion, device)
+            print(f"Training epoch {epoch + 1} completed.")
             total_train_time += epoch_time
             epochs_trained   += 1
 
             t_eval = time.perf_counter()
+            print(f"Starting evaluation on vadilation...")
             val_metrics, _ = evaluate(model, val_loader, device)
             eval_time_s = time.perf_counter() - t_eval
             val_acc = val_metrics["top1"]
+            print(f"Evaluation on validation completed.")
 
             tome_stats = get_tome_timer_stats()
             tome_info  = (
@@ -814,98 +841,3 @@ def print_comparison(baseline: BenchmarkResult, tome: BenchmarkResult):
     print("-" * 75)
     print(f"  Speed-up factor: {speedup:.2f}×")
     print("=" * 75)
-
-
-# ─────────────────────────────────────────────
-# 8. ENTRY POINT
-# ─────────────────────────────────────────────
-
-if __name__ == "__main__":
-    import argparse
-
-    script_start = time.perf_counter()
-
-    parser = argparse.ArgumentParser(
-        description="Benchmark BERT ± ToMe for journal classification.",
-        formatter_class=argparse.RawTextHelpFormatter,
-    )
-
-    # ── Data paths ──────────────────────────────────────────────────────
-    parser.add_argument("--train_csv",  default="train_dataset.csv")
-    parser.add_argument("--val_csv",    default="val_dataset.csv")
-    parser.add_argument("--test_csv",   default="test_dataset.csv")
-    parser.add_argument(
-        "--journal_csv",
-        default=None,
-        help=(
-            "Path to the journal CSV file with columns [Label, Aims, Categories].\n"
-            "When provided, Aims and Categories are left-joined into each paper\n"
-            "split by Label before the text field is constructed.\n"
-            "Required if Aims or Categories appear in --fields."
-        ),
-    )
-
-    # ── Field selection ──────────────────────────────────────────────────
-    parser.add_argument(
-        "--fields",
-        nargs="+",
-        default=DEFAULT_FIELDS,
-        choices=ALL_FIELDS,
-        metavar="FIELD",
-        help=(
-            f"Ordered list of fields to concatenate into the input text.\n"
-            f"Available: {ALL_FIELDS}\n"
-            f"Default  : {DEFAULT_FIELDS}\n\n"
-            "Examples:\n"
-            "  --fields Title Abstract Keywords\n"
-            "  --fields Title Abstract Keywords Aims Categories\n"
-            "  --fields Abstract Aims\n"
-            "  --fields Keywords Title Abstract Aims Categories\n\n"
-            "Fields from the journal CSV (Aims, Categories) require --journal_csv."
-        ),
-    )
-
-    # ── Training hyper-parameters ────────────────────────────────────────
-    parser.add_argument("--num_epochs",              type=int,   default=10)
-    parser.add_argument("--batch_size",              type=int,   default=8)
-    parser.add_argument("--max_length",              type=int,   default=128)
-    parser.add_argument("--tome_r",                  type=int,   default=8)
-    parser.add_argument("--learning_rate",           type=float, default=2e-5)
-    parser.add_argument("--early_stopping_patience", type=int,   default=3)
-
-    args = parser.parse_args()
-
-    # ── Validate journal dependency ──────────────────────────────────────
-    journal_only_fields = [f for f in args.fields if f in JOURNAL_FIELDS]
-    if journal_only_fields and args.journal_csv is None:
-        parser.error(
-            f"Fields {journal_only_fields} require --journal_csv to be specified."
-        )
-
-    # ── Load CSVs ────────────────────────────────────────────────────────
-    train_df   = pd.read_csv(args.train_csv)
-    val_df     = pd.read_csv(args.val_csv)
-    test_df    = pd.read_csv(args.test_csv)
-    journal_df = pd.read_csv(args.journal_csv) if args.journal_csv else None
-
-    # ── Run ──────────────────────────────────────────────────────────────
-    baseline, tome = run_benchmark(
-        train_df   = train_df,
-        val_df     = val_df,
-        test_df    = test_df,
-        journal_df = journal_df,
-        fields     = args.fields,
-        num_epochs              = args.num_epochs,
-        batch_size              = args.batch_size,
-        max_length              = args.max_length,
-        tome_r                  = args.tome_r,
-        learning_rate           = args.learning_rate,
-        early_stopping_patience = args.early_stopping_patience,
-    )
-
-    print_comparison(baseline, tome)
-
-    total_time = time.perf_counter() - script_start
-    print(f"\n{'='*55}")
-    print(f"  TOTAL SCRIPT EXECUTION TIME: {total_time:.2f}s ({total_time/60:.2f} min)")
-    print(f"{'='*55}")
