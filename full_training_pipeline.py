@@ -71,7 +71,7 @@ from torch import Tensor
 from typing import Optional, Tuple, Callable, List
 from dataclasses import dataclass
 from sklearn.preprocessing import LabelEncoder
-from transformers import BertTokenizer, BertModel
+from transformers import BertTokenizer, BertModel, AutoTokenizer, AutoModel
 from torch.utils.data import Dataset, DataLoader
 
 
@@ -280,9 +280,9 @@ def encode_split_labels(
 
 class PaperDataset(Dataset):
     def __init__(self, texts, labels, tokenizer, max_length=256):
-        self.texts = texts
-        self.labels = labels
-        self.tokenizer = tokenizer
+        self.texts      = texts
+        self.labels     = labels
+        self.tokenizer  = tokenizer
         self.max_length = max_length
 
     def __len__(self):
@@ -290,16 +290,16 @@ class PaperDataset(Dataset):
 
     def __getitem__(self, idx):
         encoding = self.tokenizer(
-            self.texts,
-            padding = "max_length",
-            truncation = True,
-            max_length = self.max_length,
-            return_tensors = "pt"
+            self.texts[idx],
+            padding        = "max_length",
+            truncation     = True,
+            max_length     = self.max_length,
+            return_tensors = "pt",
         )
         return {
             "input_ids":      encoding["input_ids"].squeeze(0),
             "attention_mask": encoding["attention_mask"].squeeze(0),
-            "labels":         torch.tensor(self.labels[idx], dtype = torch.long),
+            "labels":         torch.tensor(self.labels[idx], dtype=torch.long),
         }
 
 
@@ -545,7 +545,8 @@ def patch_bert_with_tome(model: BertModel, r: int = 8) -> BertModel:
 class BertClassifier(nn.Module):
     def __init__(self, num_labels: int, use_tome: bool = False, tome_r: int = 8):
         super().__init__()
-        self.bert = BertModel.from_pretrained("bert-base-uncased")
+        #self.bert = BertModel.from_pretrained("bert-base-uncased")
+        self.bert = AutoModel.from_pretrained("dmis-lab/biobert-v1.1")
 
         if use_tome:
             self.bert = patch_bert_with_tome(self.bert, r=tome_r)
@@ -847,7 +848,8 @@ def run_benchmark(
           f"| Val: {len(y_val)} | Test: {len(y_test)}")
 
     t_tok = time.perf_counter()
-    tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+    #tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+    tokenizer = AutoTokenizer.from_pretrained("dmis-lab/biobert-v1.1")
     print(f"  [Loaded tokenizer]: {time.perf_counter() - t_tok:.2f}s")
 
     # ── Datasets & Loaders ──────────────────────────────────────────────
@@ -877,6 +879,9 @@ def run_benchmark(
     # ── [CHG v2] Iterate only over modes_to_run (was hard-coded [False, True])
     results = []
     for use_tome in modes_to_run:
+        if results:
+            torch.cuda.empty_cache()
+
         label = "ToMe ON " if use_tome else "ToMe OFF"
         print(f"\n── {label} ─────────────────────────────────────────")
 
@@ -1041,7 +1046,6 @@ class Config:
     num_epochs               = 10
     batch_size               = 8
     max_length               = 512
-    tome_r                   = 8
     learning_rate            = 2e-5
     early_stopping_patience  = 3
 
