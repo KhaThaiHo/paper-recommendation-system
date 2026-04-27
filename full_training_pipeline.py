@@ -27,6 +27,18 @@ CHANGES FROM v1:
   - [NEW]  --journal_csv : optional journal dataset to contribute Aims &
            Categories; merged into paper splits by Label before text is built
 
+CHANGES FROM v2 (logging + run_mode):
+  - [NEW] TeeLogger: mirrors all stdout to a per-session .txt log file
+  - [NEW] save_session_log(): writes a structured .json log (config + results)
+  - [NEW] Config.run_mode: "baseline" | "tome" | "both"  controls which
+          models are trained; missing result is returned as None
+  - [NEW] Config.log_dir: directory where session logs are saved
+  - [CHG] run_benchmark() gains a run_mode parameter; return value is
+          (Optional[BenchmarkResult], Optional[BenchmarkResult]) — the
+          missing side is None when run_mode != "both"
+  - [CHG] __main__ block: initialises TeeLogger, passes run_mode, guards
+          print_comparison, and calls save_session_log at the end
+
 USAGE EXAMPLES:
   # Default behaviour (Title + Abstract + Keywords)
   python tome_bert_classifier.py --train_csv train.csv --val_csv val.csv --test_csv test.csv
@@ -44,6 +56,10 @@ USAGE EXAMPLES:
       --fields Keywords Title Abstract Aims Categories
 """
 
+import os           # [NEW v2] needed for makedirs in TeeLogger + save_session_log
+import sys          # [NEW v2] needed for TeeLogger (sys.stdout redirect)
+import json         # [NEW v2] needed for save_session_log JSON dump
+import datetime     # [NEW v2] needed for session timestamp
 import copy
 import time
 import math
@@ -74,6 +90,47 @@ ALL_FIELDS: List[str] = PAPER_FIELDS + JOURNAL_FIELDS
 
 # What the pipeline used before this feature was added
 DEFAULT_FIELDS: List[str] = PAPER_FIELDS
+
+
+# ─────────────────────────────────────────────
+# 0b. SESSION LOGGER  [NEW v2]
+# ─────────────────────────────────────────────
+
+class TeeLogger:
+    """
+    [NEW v2] Mirrors every print() call to both the terminal and a .txt log
+    file simultaneously by replacing sys.stdout.
+
+    WHY HERE: Placing it right after constants means it is available before
+    any other code runs.  Zero changes are needed to existing print()
+    statements — every line of output is captured automatically.
+
+    Usage:
+        logger = TeeLogger("/kaggle/working/logs/session_20240101_120000.txt")
+        sys.stdout = logger
+        ...                    # all prints go to terminal AND the file
+        logger.close()         # restores sys.stdout
+    """
+
+    def __init__(self, filepath: str):
+        self.terminal = sys.stdout
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        # buffering=1 → line-buffered so output appears in the file
+        # in real time even if the process crashes mid-run.
+        self.log = open(filepath, "w", buffering=1, encoding="utf-8")
+
+    def write(self, message: str):
+        self.terminal.write(message)
+        self.log.write(message)
+
+    def flush(self):
+        self.terminal.flush()
+        self.log.flush()
+
+    def close(self):
+        """Restore original stdout and close the file handle."""
+        sys.stdout = self.terminal
+        self.log.close()
 
 
 # ─────────────────────────────────────────────
@@ -594,6 +651,87 @@ def count_params(model) -> int:
 
 
 # ─────────────────────────────────────────────
+# 5b. SESSION LOG WRITER  [NEW v2]
+# ─────────────────────────────────────────────
+
+def save_session_log(
+    config,
+    baseline: Optional["BenchmarkResult"],
+    tome: Optional["BenchmarkResult"],
+    total_time_s: float,
+    log_dir: str,
+    session_id: str,
+) -> str:
+    """
+    [NEW v2] Write a structured JSON file capturing config + results for
+    this training session.
+
+    WHY A SEPARATE FUNCTION: Keeps all serialisation logic in one place;
+    run_benchmark() and __main__ stay unchanged except for one call site.
+
+    File path: <log_dir>/session_<session_id>.json
+                e.g.  /kaggle/working/logs/session_20240101_120000.json
+
+    Args:
+        config       : the Config class (attributes read directly).
+        baseline     : BenchmarkResult for ToMe-OFF run, or None.
+        tome         : BenchmarkResult for ToMe-ON run, or None.
+        total_time_s : wall-clock seconds for the entire __main__ block.
+        log_dir      : directory to write the file into.
+        session_id   : timestamp string used as filename suffix.
+
+    Returns:
+        Absolute path of the written JSON file.
+    """
+    def _result_to_dict(r: Optional["BenchmarkResult"]) -> Optional[dict]:
+        if r is None:
+            return None
+        return {
+            "mode":             r.mode.strip(),
+            "accuracy_top1":   r.accuracy_top1,
+            "accuracy_top3":   r.accuracy_top3,
+            "accuracy_top5":   r.accuracy_top5,
+            "accuracy_top10":  r.accuracy_top10,
+            "avg_inference_s": r.avg_inference_s,
+            "peak_memory_mb":  r.peak_memory_mb,
+            "total_params":    r.total_params,
+            "epochs_trained":  r.epochs_trained,
+        }
+
+    log_data = {
+        "session_id":   session_id,
+        "timestamp":    session_id,          # human-readable duplicate
+        "config": {
+            "run_mode":                 config.run_mode,
+            "fields":                   config.fields,
+            "num_epochs":               config.num_epochs,
+            "batch_size":               config.batch_size,
+            "max_length":               config.max_length,
+            "tome_r":                   config.tome_r,
+            "learning_rate":            config.learning_rate,
+            "early_stopping_patience":  config.early_stopping_patience,
+            "train_csv":                config.train_csv,
+            "val_csv":                  config.val_csv,
+            "test_csv":                 config.test_csv,
+            "journal_csv":              getattr(config, "journal_csv", None),
+        },
+        "results": {
+            "baseline": _result_to_dict(baseline),
+            "tome":     _result_to_dict(tome),
+        },
+        "total_time_s": round(total_time_s, 3),
+    }
+
+    os.makedirs(log_dir, exist_ok=True)
+    json_path = os.path.join(log_dir, f"session_{session_id}.json")
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(log_data, f, indent=2)
+
+    print(f"\n[Log saved → JSON] {json_path}")
+    return json_path
+
+
+# ─────────────────────────────────────────────
 # 6. FULL BENCHMARK PIPELINE
 # ─────────────────────────────────────────────
 
@@ -609,11 +747,13 @@ def run_benchmark(
     tome_r: int = 8,
     learning_rate: float = 2e-5,
     early_stopping_patience: int = 3,
-) -> Tuple[BenchmarkResult, BenchmarkResult]:
+    run_mode: str = "both",                    # [NEW v2] "baseline" | "tome" | "both"
+) -> Tuple[Optional[BenchmarkResult], Optional[BenchmarkResult]]:
     """
-    Trains and evaluates two models:
-      - Baseline BERT (no ToMe)
-      - BERT + Token Merging
+    Trains and evaluates one or both models depending on run_mode:
+      - "baseline" → trains BERT only;        returns (baseline, None)
+      - "tome"     → trains BERT + ToMe only; returns (None, tome)
+      - "both"     → trains both;             returns (baseline, tome)
 
     Args:
         train_df / val_df / test_df:
@@ -627,11 +767,15 @@ def run_benchmark(
             Defaults to DEFAULT_FIELDS = ["Title", "Abstract", "Keywords"].
             Any column present after the optional journal merge is valid:
               Title, Abstract, Keywords, Aims, Categories
+        run_mode:                                   [NEW v2]
+            Which model(s) to train and evaluate.
+            "baseline" skips ToMe; "tome" skips baseline; "both" runs both.
         num_epochs / batch_size / max_length / tome_r / learning_rate /
         early_stopping_patience: training hyper-parameters.
 
     Returns:
-        (baseline_result, tome_result) – BenchmarkResult named-tuples.
+        (baseline_result, tome_result) – either may be None depending on
+        run_mode.
     """
     if fields is None:
         fields = DEFAULT_FIELDS
@@ -644,9 +788,26 @@ def run_benchmark(
             f"Valid options are: {ALL_FIELDS}"
         )
 
+    # ── [NEW v2] Build the list of use_tome flags to iterate ────────────
+    # Map run_mode → the booleans passed to BertClassifier.
+    # "baseline" → [False], "tome" → [True], "both" → [False, True]
+    _mode_map = {
+        "baseline": [False],
+        "tome":     [True],
+        "both":     [False, True],
+    }
+    if run_mode not in _mode_map:
+        raise ValueError(
+            f"Invalid run_mode='{run_mode}'. "
+            f"Choose from: {list(_mode_map.keys())}"
+        )
+    modes_to_run = _mode_map[run_mode]
+    # ─────────────────────────────────────────────────────────────────────
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"\nUsing device: {device}")
     print(f"Input fields : {fields}")
+    print(f"Run mode     : {run_mode}")          # [NEW v2] log active mode
     if journal_df is not None:
         print(f"Journal CSV  : provided ({len(journal_df)} rows)")
     print("=" * 55)
@@ -707,8 +868,9 @@ def run_benchmark(
     print(f"  [Created dataloaders]: {time.perf_counter() - t_dl:.2f}s")
     print(f"  Total preprocessing: {time.perf_counter() - t_preprocess:.2f}s\n")
 
+    # ── [CHG v2] Iterate only over modes_to_run (was hard-coded [False, True])
     results = []
-    for use_tome in [False, True]:
+    for use_tome in modes_to_run:
         label = "ToMe ON " if use_tome else "ToMe OFF"
         print(f"\n── {label} ─────────────────────────────────────────")
 
@@ -806,7 +968,16 @@ def run_benchmark(
         print(f"    Total training time: {total_train_time:.2f}s")
         print(f"    Epochs trained:      {epochs_trained}/{num_epochs}")
 
-    return results[0], results[1]
+    # ── [CHG v2] Return (Optional, Optional) instead of results[0], results[1]
+    # Look up each result by its mode label so the caller always gets
+    # (baseline, tome) in the right slots regardless of run_mode order.
+    baseline_result = next(
+        (r for r in results if r.mode.strip() == "ToMe OFF"), None
+    )
+    tome_result = next(
+        (r for r in results if r.mode.strip() == "ToMe ON"), None
+    )
+    return baseline_result, tome_result
 
 
 # ─────────────────────────────────────────────
@@ -842,49 +1013,88 @@ def print_comparison(baseline: BenchmarkResult, tome: BenchmarkResult):
     print(f"  Speed-up factor: {speedup:.2f}×")
     print("=" * 75)
 
-# 1. Define your configuration here
+
+# ─────────────────────────────────────────────
+# 8. ENTRY POINT  [CHG v2]
+# ─────────────────────────────────────────────
+
 class Config:
-    train_csv = "/kaggle/input/datasets/basdong/paper-submission/train_set.csv"
-    val_csv   = "/kaggle/input/datasets/basdong/paper-submission/val_set.csv"
-    test_csv  = "/kaggle/input/datasets/basdong/paper-submission/test_set.csv"
+    train_csv   = "/kaggle/input/datasets/basdong/paper-submission/train_set.csv"
+    val_csv     = "/kaggle/input/datasets/basdong/paper-submission/val_set.csv"
+    test_csv    = "/kaggle/input/datasets/basdong/paper-submission/test_set.csv"
     journal_csv = "/kaggle/input/datasets/basdong/paper-submission/journal_category.csv"
-    
-    fields = ["Title", "Abstract", "Keywords", "Aims"] # Manually set your list
-    num_epochs = 10
-    batch_size = 8
-    max_length = 512
-    tome_r = 8
-    learning_rate = 2e-5
-    early_stopping_patience = 3
+
+    fields = ["Title", "Abstract", "Keywords", "Aims"]  # Manually set your list
+
+    # ── [NEW v2] run_mode: "baseline" | "tome" | "both" ─────────────────
+    run_mode = "both"
+
+    # ── [NEW v2] Where session logs (.txt + .json) are written ──────────
+    log_dir  = "/kaggle/working/logs"
+
+    num_epochs               = 10
+    batch_size               = 8
+    max_length               = 512
+    tome_r                   = 8
+    learning_rate            = 2e-5
+    early_stopping_patience  = 3
+
 
 if __name__ == "__main__":
-    script_start = time.perf_counter()
+    # ── [NEW v2] Create a unique session ID from the current timestamp ───
+    session_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    # 2. Load Data using the Config class
-    train_df = pd.read_csv(Config.train_csv)
-    val_df   = pd.read_csv(Config.val_csv)
-    test_df  = pd.read_csv(Config.test_csv)
-    journal_df = pd.read_csv(Config.journal_csv)
+    # ── [NEW v2] Start TeeLogger — all prints below go to terminal + file
+    log_txt_path = os.path.join(Config.log_dir, f"session_{session_id}.txt")
+    logger = TeeLogger(log_txt_path)
+    sys.stdout = logger
+    print(f"[Session {session_id}] Log file: {log_txt_path}")
 
-    # 3. Run Benchmark
-    # Note: I added Config references to match your run_benchmark signature
-    baseline, tome = run_benchmark(
-        train_df=train_df,
-        val_df=val_df,
-        test_df=test_df,
-        journal_df=journal_df,
-        fields=Config.fields,
-        num_epochs=Config.num_epochs,
-        batch_size=Config.batch_size,
-        max_length=Config.max_length,
-        tome_r=Config.tome_r,
-        learning_rate=Config.learning_rate,
-        early_stopping_patience=Config.early_stopping_patience
-    )
+    try:
+        script_start = time.perf_counter()
 
-    print_comparison(baseline, tome)
+        # Load Data
+        train_df   = pd.read_csv(Config.train_csv)
+        val_df     = pd.read_csv(Config.val_csv)
+        test_df    = pd.read_csv(Config.test_csv)
+        journal_df = pd.read_csv(Config.journal_csv)
 
-    total_time = time.perf_counter() - script_start
-    print(f"\n{'='*55}")
-    print(f" TOTAL SCRIPT EXECUTION TIME: {total_time:.2f}s")
-    print(f"{'='*55}")
+        # Run Benchmark — pass run_mode so only requested models train
+        baseline, tome = run_benchmark(
+            train_df=train_df,
+            val_df=val_df,
+            test_df=test_df,
+            journal_df=journal_df,
+            fields=Config.fields,
+            num_epochs=Config.num_epochs,
+            batch_size=Config.batch_size,
+            max_length=Config.max_length,
+            tome_r=Config.tome_r,
+            learning_rate=Config.learning_rate,
+            early_stopping_patience=Config.early_stopping_patience,
+            run_mode=Config.run_mode,              # [NEW v2]
+        )
+
+        # ── [NEW v2] Only print comparison when both results exist ───────
+        if baseline is not None and tome is not None:
+            print_comparison(baseline, tome)
+
+        total_time = time.perf_counter() - script_start
+        print(f"\n{'='*55}")
+        print(f" TOTAL SCRIPT EXECUTION TIME: {total_time:.2f}s")
+        print(f"{'='*55}")
+
+        # ── [NEW v2] Save structured JSON log ────────────────────────────
+        save_session_log(
+            config=Config,
+            baseline=baseline,
+            tome=tome,
+            total_time_s=total_time,
+            log_dir=Config.log_dir,
+            session_id=session_id,
+        )
+        print(f"[Log saved → TXT]  {log_txt_path}")
+
+    finally:
+        # Always restore stdout even if an exception occurred
+        logger.close()
