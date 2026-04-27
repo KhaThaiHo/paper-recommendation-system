@@ -841,3 +841,50 @@ def print_comparison(baseline: BenchmarkResult, tome: BenchmarkResult):
     print("-" * 75)
     print(f"  Speed-up factor: {speedup:.2f}×")
     print("=" * 75)
+
+# 1. Define your configuration here
+class Config:
+    train_csv = "/kaggle/input/datasets/basdong/paper-submission/train_set.csv"
+    val_csv   = "/kaggle/input/datasets/basdong/paper-submission/val_set.csv"
+    test_csv  = "/kaggle/input/datasets/basdong/paper-submission/test_set.csv"
+    journal_csv = "/kaggle/input/datasets/basdong/paper-submission/journal_category.csv"
+    
+    fields = ["Title", "Abstract", "Keywords", "Aims"] # Manually set your list
+    num_epochs = 10
+    batch_size = 8
+    max_length = 512
+    tome_r = 8
+    learning_rate = 2e-5
+    early_stopping_patience = 3
+
+if __name__ == "__main__":
+    script_start = time.perf_counter()
+
+    # 2. Load Data using the Config class
+    train_df = pd.read_csv(Config.train_csv)
+    val_df   = pd.read_csv(Config.val_csv)
+    test_df  = pd.read_csv(Config.test_csv)
+    journal_df = pd.read_csv(Config.journal_csv)
+
+    # 3. Run Benchmark
+    # Note: I added Config references to match your run_benchmark signature
+    baseline, tome = run_benchmark(
+        train_df=train_df,
+        val_df=val_df,
+        test_df=test_df,
+        journal_df=journal_df,
+        fields=Config.fields,
+        num_epochs=Config.num_epochs,
+        batch_size=Config.batch_size,
+        max_length=Config.max_length,
+        tome_r=Config.tome_r,
+        learning_rate=Config.learning_rate,
+        early_stopping_patience=Config.early_stopping_patience
+    )
+
+    print_comparison(baseline, tome)
+
+    total_time = time.perf_counter() - script_start
+    print(f"\n{'='*55}")
+    print(f" TOTAL SCRIPT EXECUTION TIME: {total_time:.2f}s")
+    print(f"{'='*55}")
