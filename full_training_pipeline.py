@@ -71,7 +71,7 @@ from torch import Tensor
 from typing import Optional, Tuple, Callable, List
 from dataclasses import dataclass
 from sklearn.preprocessing import LabelEncoder
-from transformers import BertTokenizer, BertModel, AutoTokenizer, AutoModel
+from transformers import AutoTokenizer, AutoModel
 from torch.utils.data import Dataset, DataLoader
 
 
@@ -527,7 +527,7 @@ class ToMeBertAttention(nn.Module):
         return (attention_output, attn_weights)
 
 
-def patch_bert_with_tome(model: BertModel, r: int = 8) -> BertModel:
+def patch_bert_with_tome(model: AutoModel, r: int = 8) -> AutoModel:
     """
     Replace every BertAttention block with ToMeBertAttention.
     Patching the full block (not just self-attn) is required so that
@@ -542,11 +542,14 @@ def patch_bert_with_tome(model: BertModel, r: int = 8) -> BertModel:
 # 4. CLASSIFIER MODEL
 # ─────────────────────────────────────────────
 
+MODEL_NAME = "dmis-lab/biobert-v1.1"   # [CHG v4] single place to change model
+
+
 class BertClassifier(nn.Module):
-    def __init__(self, num_labels: int, use_tome: bool = False, tome_r: int = 8):
+    def __init__(self, pretrained_model: AutoModel,
+                 num_labels: int, use_tome: bool = False, tome_r: int = 8):
         super().__init__()
-        #self.bert = BertModel.from_pretrained("bert-base-uncased")
-        self.bert = AutoModel.from_pretrained("dmis-lab/biobert-v1.1")
+        self.bert = copy.deepcopy(pretrained_model)   # independent weights, no download
 
         if use_tome:
             self.bert = patch_bert_with_tome(self.bert, r=tome_r)
@@ -848,9 +851,10 @@ def run_benchmark(
           f"| Val: {len(y_val)} | Test: {len(y_test)}")
 
     t_tok = time.perf_counter()
-    #tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
-    tokenizer = AutoTokenizer.from_pretrained("dmis-lab/biobert-v1.1")
-    print(f"  [Loaded tokenizer]: {time.perf_counter() - t_tok:.2f}s")
+    print(f"Downloading tokenizer and base model: {MODEL_NAME} …")
+    tokenizer  = AutoTokenizer.from_pretrained(MODEL_NAME)
+    base_model = AutoModel.from_pretrained(MODEL_NAME)
+    print(f"  [Loaded tokenizer + base model]: {time.perf_counter() - t_tok:.2f}s")
 
     # ── Datasets & Loaders ──────────────────────────────────────────────
     t_ds = time.perf_counter()
@@ -889,7 +893,12 @@ def run_benchmark(
             torch.cuda.reset_peak_memory_stats(device)
 
         t_init = time.perf_counter()
-        model     = BertClassifier(num_labels, use_tome=use_tome, tome_r=tome_r).to(device)
+        model = BertClassifier(
+            pretrained_model = base_model,   # [CHG v4] pre-loaded, no download
+            num_labels       = num_labels,
+            use_tome         = use_tome,
+            tome_r           = tome_r,
+        ).to(device)
         optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
         criterion = nn.CrossEntropyLoss()
         print(f"  [Model initialized]: {time.perf_counter() - t_init:.2f}s")
@@ -1046,6 +1055,7 @@ class Config:
     num_epochs               = 10
     batch_size               = 8
     max_length               = 512
+    tome_r                   = 8
     learning_rate            = 2e-5
     early_stopping_patience  = 3
 
