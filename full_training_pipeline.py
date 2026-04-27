@@ -127,6 +127,12 @@ class TeeLogger:
         self.terminal.flush()
         self.log.flush()
 
+    def isatty(self) -> bool:
+        # Always report non-interactive so libraries (e.g. HuggingFace) that
+        # call sys.stdout.isatty() don't crash and skip ANSI colour codes,
+        # which keeps the log file clean.
+        return False
+
     def close(self):
         """Restore original stdout and close the file handle."""
         sys.stdout = self.terminal
