@@ -83,9 +83,7 @@ def print_comparison(baseline: BenchmarkResult, tome: Optional[BenchmarkResult])
 def parse_args():
 	parser = argparse.ArgumentParser(description="Run benchmark with configurable parameters")
 
-	parser.add_argument("--train_path", type=str, required=True)
-	parser.add_argument("--val_path", type=str, required=True)
-	parser.add_argument("--test_path", type=str, required=True)
+	parser.add_argument("--df_path", type=str, required=True)
 	parser.add_argument("--journal_path", type=str, required=True)
 
 	parser.add_argument("--text_combination", type=str, default="TAK")

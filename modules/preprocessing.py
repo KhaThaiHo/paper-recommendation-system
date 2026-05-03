@@ -158,8 +158,8 @@ def load_and_prepare_splits(
     df_filtered = df[label_mask].sample(10000, random_state=42).reset_index(drop=True)
 
     # Assuming the dataframe has a column indicating the split (e.g., 'split')
-    train_df, temp_df = df_filtered.train_test_split(test_size=0.2, random_state=42)
-    val_df, test_df = temp_df.train_test_split(test_size=0.5, random_state=42)
+    train_df, temp_df = train_test_split(df_filtered, test_size=0.2, random_state=42)
+    val_df, test_df = train_test_split(temp_df, test_size=0.5, random_state=42)
 
     journal_df = pd.read_csv(journal_path)
 
