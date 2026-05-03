@@ -3,6 +3,7 @@ from typing import Optional
 
 import pandas as pd
 from sklearn.preprocessing import LabelEncoder
+from sklearn.model_selection import train_test_split
 
 
 ALLOWED_TEXT_CODES = {"T", "A", "K", "C", "S"}
@@ -143,18 +144,22 @@ def _encode_split_labels(split_df: pd.DataFrame, label_to_id: dict[str, int], la
 
 
 def load_and_prepare_splits(
-    train_path: str,
-    val_path: str,
-    test_path: str,
+    df_path: str,
     config: PreprocessConfig,
     journal_path: str,
 ) -> PreparedDataBundle:
     if not journal_path:
         raise ValueError("journal_path is required because train/journal joining is always enabled")
 
-    train_df = pd.read_csv(train_path)
-    val_df = pd.read_csv(val_path)
-    test_df = pd.read_csv(test_path)
+    df = pd.read_csv(df_path)
+    df = df.drop_duplicates().reset_index(drop=True)
+
+    label_mask = df["Label"].between(1, 15) # = 13688 samples
+    df_filtered = df[label_mask].sample(10000, random_state=42).reset_index(drop=True)
+
+    # Assuming the dataframe has a column indicating the split (e.g., 'split')
+    train_df, temp_df = df_filtered.train_test_split(test_size=0.2, random_state=42)
+    val_df, test_df = temp_df.train_test_split(test_size=0.5, random_state=42)
 
     journal_df = pd.read_csv(journal_path)
 

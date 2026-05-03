@@ -12,9 +12,7 @@ def main() -> None:
     script_start = time.perf_counter()
 
     baseline, tome = run_benchmark(
-        train_path=args.train_path,
-        val_path=args.val_path,
-        test_path=args.test_path,
+        df_path=args.df_path,
         num_epochs=args.num_epochs,
         batch_size=args.batch_size,
         max_length=args.max_length,

@@ -91,7 +91,6 @@ Use this command format (PowerShell):
 python main.py `
   --df_path "D:\File\Preprocessed_data\train_set.csv" `
   --journal_path "D:\File\Preprocessed_data\journal_category.csv" `
-  --sample_size 5000 `
   --text_combination "TAKCS" `
   --label_col "Label" `
   --journal_label_col "Label" `
@@ -109,7 +108,7 @@ python main.py `
 Or on one line:
 
 ```powershell
-python main.py --train_path "D:\File\data\train.csv" --val_path "D:\File\data\val.csv" --test_path "D:\File\data\test.csv" --journal_path "D:\File\data\journal.csv" --text_combination "TAKCS" --label_col "Label" --journal_label_col "Categories" --journal_category_col "Categories" --journal_scope_col "Aims" --num_epochs 20 --batch_size 8 --max_length 128 --tome_r 8 --learning_rate 2e-5 --early_stopping_patience 3 --checkpoint_dir "./checkpoints"
+python main.py --df_path "D:\File\Preprocessed_data\train_set.csv"  --journal_path "D:\File\Preprocessed_data\journal_category.csv" --text_combination "TAKCS" --label_col "Label" --journal_label_col "Categories" --journal_category_col "Categories" --journal_scope_col "Aims" --num_epochs 20 --batch_size 8 --max_length 512 --tome_r 8 --learning_rate 2e-5 --early_stopping_patience 3 --checkpoint_dir "./checkpoints"
 ```
 
 Notes:

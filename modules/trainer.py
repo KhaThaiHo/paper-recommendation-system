@@ -87,9 +87,7 @@ def _build_checkpoint_paths(checkpoint_dir: str, mode_name: str) -> tuple[str, s
 
 
 def run_benchmark(
-    train_path: str,
-    val_path: str,
-    test_path: str,
+    df_path: str,
     num_epochs: int = 10,
     batch_size: int = 16,
     max_length: int = 256,
@@ -122,9 +120,7 @@ def run_benchmark(
 
     t_preprocess = time.perf_counter()
     prepared_data = load_and_prepare_splits(
-        train_path=train_path,
-        val_path=val_path,
-        test_path=test_path,
+        df_path=df_path,
         config=preprocess_config,
         journal_path=journal_path,
     )
