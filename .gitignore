@@ -5,3 +5,4 @@ __pycache__/
 .md
 .json
 .vscode/
+checkpoints/

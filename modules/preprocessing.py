@@ -148,36 +148,48 @@ def load_and_prepare_splits(
     config: PreprocessConfig,
     journal_path: str,
 ) -> PreparedDataBundle:
+    print("[DEBUG] *** ENTERED load_and_prepare_splits() ***")
     if not journal_path:
         raise ValueError("journal_path is required because train/journal joining is always enabled")
 
+    print(f"[DEBUG] Reading CSV from {df_path}")
     df = pd.read_csv(df_path)
+    print(f"[DEBUG] CSV read complete, DataFrame has {len(df)} rows and {len(df.columns)} columns")
+    print(f"[DEBUG] Starting drop_duplicates()...")
     df = df.drop_duplicates().reset_index(drop=True)
+    print(f"[DEBUG] After drop_duplicates: {len(df)} samples")
+    print(f"Loaded dataframe with {len(df)} samples from {df_path}")
 
     label_mask = df["Label"].between(1, 15) # = 13688 samples
     df_filtered = df[label_mask].sample(10000, random_state=42).reset_index(drop=True)
+    print(f"Filtered to {len(df_filtered)} samples with Label between 1 and 15, then took a random sample of 10,000 for processing.")
 
     # Assuming the dataframe has a column indicating the split (e.g., 'split')
     train_df, temp_df = train_test_split(df_filtered, test_size=0.2, random_state=42)
     val_df, test_df = train_test_split(temp_df, test_size=0.5, random_state=42)
+    print(f"Split into train ({len(train_df)} samples), validation ({len(val_df)} samples), and test ({len(test_df)} samples)")
 
     journal_df = pd.read_csv(journal_path)
 
     train_df = build_text_column(train_df, config, journal_df=journal_df)
     val_df = build_text_column(val_df, config, journal_df=journal_df)
     test_df = build_text_column(test_df, config, journal_df=journal_df)
+    print(f"Built text column for all splits using text combination '{config.text_combination}'")
 
     train_df = _drop_missing_labels(train_df, config.label_col)
     val_df = _drop_missing_labels(val_df, config.label_col)
     test_df = _drop_missing_labels(test_df, config.label_col)
+    print(f"Dropped samples with missing labels. Remaining samples - train: {len(train_df)}, validation: {len(val_df)}, test: {len(test_df)}")
 
     encoder = LabelEncoder()
     encoder.fit(train_df[config.label_col].astype(str))
     label_to_id = {label: idx for idx, label in enumerate(encoder.classes_)}
+    print(f"Encoded labels in training split. Found {len(encoder.classes_)} unique labels.")
 
     x_train, y_train = _encode_split_labels(train_df, label_to_id, config.label_col, "train")
     x_val, y_val = _encode_split_labels(val_df, label_to_id, config.label_col, "validation")
     x_test, y_test = _encode_split_labels(test_df, label_to_id, config.label_col, "test")
+    print(f"Encoded labels in validation and test splits. After filtering unseen labels - validation: {len(y_val)} samples, test: {len(y_test)} samples.")
 
     return PreparedDataBundle(
         x_train=x_train,

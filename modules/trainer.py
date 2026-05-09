@@ -107,9 +107,11 @@ def run_benchmark(
 
     os.makedirs(checkpoint_dir, exist_ok=True)
 
+    print(f"[DEBUG] journal_path = {journal_path}")
     if not journal_path:
         raise ValueError("journal_path is required because preprocessing always joins train with journal data")
 
+    print("[DEBUG] Creating PreprocessConfig...")
     preprocess_config = PreprocessConfig(
         text_combination=text_combination,
         label_col=label_col,
@@ -117,8 +119,10 @@ def run_benchmark(
         journal_category_col=journal_category_col,
         journal_scope_col=journal_scope_col,
     )
+    print(f"[DEBUG] Preprocess config created: {preprocess_config}")
 
     t_preprocess = time.perf_counter()
+    print(f"[DEBUG] About to call load_and_prepare_splits with df_path={df_path}")
     prepared_data = load_and_prepare_splits(
         df_path=df_path,
         config=preprocess_config,

@@ -19,7 +19,7 @@ Create and activate a virtual environment, then install dependencies:
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\Activate.ps1
+.venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
