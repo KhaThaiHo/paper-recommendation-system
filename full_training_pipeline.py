@@ -63,6 +63,7 @@ import datetime     # [NEW v2] needed for session timestamp
 import copy
 import time
 import math
+import gc
 import torch
 import torch.nn as nn
 import numpy as np
@@ -278,28 +279,74 @@ def encode_split_labels(
     return texts, encoded_labels
 
 
-class PaperDataset(Dataset):
-    def __init__(self, texts, labels, tokenizer, max_length=256):
-        self.texts      = texts
-        self.labels     = labels
-        self.tokenizer  = tokenizer
-        self.max_length = max_length
+def pretokenize_to_disk(texts, labels, tokenizer, max_length, save_dir, split_name):
+    """
+    Tokenize all texts once and save as memory-mapped numpy arrays.
+    This lets the DataLoader read directly from disk with zero RAM overhead.
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    n = len(texts)
+
+    input_ids_path      = os.path.join(save_dir, f"{split_name}_input_ids.npy")
+    attention_mask_path = os.path.join(save_dir, f"{split_name}_attention_mask.npy")
+    labels_path         = os.path.join(save_dir, f"{split_name}_labels.npy")
+
+    if os.path.exists(input_ids_path):
+        print(f"  [Cache hit] Loading pre-tokenized {split_name} from disk …")
+        input_ids      = np.load(input_ids_path,      mmap_mode="r")
+        attention_mask = np.load(attention_mask_path, mmap_mode="r")
+        labels_arr     = np.load(labels_path)
+        return input_ids, attention_mask, labels_arr
+
+    print(f"  [Pre-tokenizing {split_name}: {n} samples] …")
+    # Allocate memmap arrays on disk — never fully loaded into RAM
+    input_ids      = np.lib.format.open_memmap(
+        input_ids_path, mode="w+", dtype=np.int32, shape=(n, max_length))
+    attention_mask = np.lib.format.open_memmap(
+        attention_mask_path, mode="w+", dtype=np.int8,  shape=(n, max_length))
+
+    CHUNK = 2000   # tokenize in chunks to control RAM usage
+    for start in range(0, n, CHUNK):
+        end   = min(start + CHUNK, n)
+        chunk = tokenizer(
+            texts[start:end],
+            padding        = "max_length",
+            truncation     = True,
+            max_length     = max_length,
+            return_tensors = "np",          # numpy, NOT torch — no GPU overhead
+        )
+        input_ids[start:end]      = chunk["input_ids"].astype(np.int32)
+        attention_mask[start:end] = chunk["attention_mask"].astype(np.int8)
+        if start % 50000 == 0:
+            print(f"    … {end}/{n}")
+
+    np.save(labels_path, np.array(labels, dtype=np.int32))
+    print(f"  [Pre-tokenized {split_name} saved to {save_dir}]")
+
+    input_ids      = np.load(input_ids_path,      mmap_mode="r")
+    attention_mask = np.load(attention_mask_path, mmap_mode="r")
+    labels_arr     = np.load(labels_path)
+    return input_ids, attention_mask, labels_arr
+
+
+class DiskDataset(Dataset):
+    """
+    Reads tokenized data from memory-mapped numpy arrays.
+    Only the requested batch rows are loaded from disk — RAM usage is O(batch).
+    """
+    def __init__(self, input_ids, attention_mask, labels):
+        self.input_ids      = input_ids       # np memmap (n, max_length)
+        self.attention_mask = attention_mask  # np memmap (n, max_length)
+        self.labels         = labels          # np array  (n,)
 
     def __len__(self):
         return len(self.labels)
 
     def __getitem__(self, idx):
-        encoding = self.tokenizer(
-            self.texts[idx],
-            padding        = "max_length",
-            truncation     = True,
-            max_length     = self.max_length,
-            return_tensors = "pt",
-        )
         return {
-            "input_ids":      encoding["input_ids"].squeeze(0),
-            "attention_mask": encoding["attention_mask"].squeeze(0),
-            "labels":         torch.tensor(self.labels[idx], dtype=torch.long),
+            "input_ids":      torch.tensor(self.input_ids[idx],      dtype=torch.long),
+            "attention_mask": torch.tensor(self.attention_mask[idx], dtype=torch.long),
+            "labels":         torch.tensor(self.labels[idx],         dtype=torch.long),
         }
 
 
@@ -840,12 +887,17 @@ def run_benchmark(
     le.fit(train_df["Label"].astype(str))
     label_to_id = {label: idx for idx, label in enumerate(le.classes_)}
 
-    print(f"Start encoding and spliting...")
+    print(f">>> Start encoding and spliting...")
     X_train, y_train = encode_split_labels(train_df, label_to_id, "train")
     X_val,   y_val   = encode_split_labels(val_df,   label_to_id, "validation")
     X_test,  y_test  = encode_split_labels(test_df,  label_to_id, "test")
     print(f"Encoding and splitting completed.")
 
+    print(f">>> Deleting raw DataFrames to free memory...")
+    del train_df, val_df, test_df
+    print(f">>> Raw DataFrames deleted.")
+    gc.collect()
+    
     num_labels = len(le.classes_)
     print(f"Classes: {num_labels} | Train: {len(y_train)} "
           f"| Val: {len(y_val)} | Test: {len(y_test)}")
@@ -858,17 +910,25 @@ def run_benchmark(
 
     # ── Datasets & Loaders ──────────────────────────────────────────────
     t_ds = time.perf_counter()
-    print(f"Starting tokenize train set...")
-    train_ds = PaperDataset(X_train, y_train, tokenizer, max_length)
-    print(f"Tokenize train set completed.")
+    CACHE_DIR = "/kaggle/working/tokenized_cache"
+    print(f"Starting pre-tokenization and saving to disk cache (dir: {CACHE_DIR})...")
+    input_ids_tr, attn_tr, labels_tr = pretokenize_to_disk(
+        X_train, y_train, tokenizer, max_length, CACHE_DIR, "train")
+    print(f"  [Pre-tokenized train set]: {time.perf_counter() - t_ds:.2f}s")
+    input_ids_va, attn_va, labels_va = pretokenize_to_disk(
+        X_val,   y_val,   tokenizer, max_length, CACHE_DIR, "val")
+    print(f"  [Pre-tokenized validation set]: {time.perf_counter() - t_ds:.2f}s")
+    input_ids_te, attn_te, labels_te = pretokenize_to_disk(
+        X_test,  y_test,  tokenizer, max_length, CACHE_DIR, "test")
+    print(f"  [Pre-tokenized test set]: {time.perf_counter() - t_ds:.2f}s")
 
-    print(f"Starting tokenize validation set...")
-    val_ds   = PaperDataset(X_val,   y_val,   tokenizer, max_length)
-    print(f"Tokenize validation set completed.")
+    # Free the raw text lists — no longer needed
+    del X_train, X_val, X_test, y_train, y_val, y_test
+    gc.collect()
 
-    print(f"Starting tokenize test set...")
-    test_ds  = PaperDataset(X_test,  y_test,  tokenizer, max_length)
-    print(f"Tokenize test set completed.")
+    train_ds = DiskDataset(input_ids_tr, attn_tr, labels_tr)
+    val_ds   = DiskDataset(input_ids_va, attn_va, labels_va)
+    test_ds  = DiskDataset(input_ids_te, attn_te, labels_te)
 
     print(f"  [Created datasets]: {time.perf_counter() - t_ds:.2f}s")
 
@@ -899,9 +959,16 @@ def run_benchmark(
             use_tome         = use_tome,
             tome_r           = tome_r,
         ).to(device)
+
+        if torch.cuda.device_count() > 1:
+            print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
+            model = nn.DataParallel(model)
         optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
         criterion = nn.CrossEntropyLoss()
         print(f"  [Model initialized]: {time.perf_counter() - t_init:.2f}s")
+        del base_model   # free the original base model — no longer needed
+        gc.collect()
+        print(f"  [Base model deleted]: {time.perf_counter() - t_init:.2f}s")
 
         best_val_acc    = 0.0
         patience_counter = 0
@@ -963,7 +1030,7 @@ def run_benchmark(
         print(f"  [Testing completed]: {time.perf_counter() - t_test:.2f}s")
 
         mem    = peak_memory_mb(device)
-        params = count_params(model)
+        params = count_params(model.module if isinstance(model, nn.DataParallel) else model)
 
         result = BenchmarkResult(
             mode            = label,
