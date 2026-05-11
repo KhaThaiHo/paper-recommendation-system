@@ -292,6 +292,20 @@ def pretokenize_to_disk(texts, labels, tokenizer, max_length, save_dir, split_na
     attention_mask_path = os.path.join(save_dir, f"{split_name}_attention_mask.npy")
     labels_path         = os.path.join(save_dir, f"{split_name}_labels.npy")
 
+    # Prefer pre-tokenized files from a Kaggle dataset cache if available.
+    kaggle_cache_dir = "/kaggle/input/datasets/khathih/tokenized-cache"
+    kaggle_input_ids_path      = os.path.join(kaggle_cache_dir, f"{split_name}_input_ids.npy")
+    kaggle_attention_mask_path = os.path.join(kaggle_cache_dir, f"{split_name}_attention_mask.npy")
+    kaggle_labels_path         = os.path.join(kaggle_cache_dir, f"{split_name}_labels.npy")
+    if (os.path.exists(kaggle_input_ids_path)
+            and os.path.exists(kaggle_attention_mask_path)
+            and os.path.exists(kaggle_labels_path)):
+        print(f"  [Cache hit] Loading pre-tokenized {split_name} from Kaggle cache …")
+        input_ids      = np.load(kaggle_input_ids_path,      mmap_mode="r")
+        attention_mask = np.load(kaggle_attention_mask_path, mmap_mode="r")
+        labels_arr     = np.load(kaggle_labels_path)
+        return input_ids, attention_mask, labels_arr
+
     if os.path.exists(input_ids_path):
         print(f"  [Cache hit] Loading pre-tokenized {split_name} from disk …")
         input_ids      = np.load(input_ids_path,      mmap_mode="r")
@@ -590,8 +604,6 @@ def patch_bert_with_tome(model: AutoModel, r: int = 8) -> AutoModel:
 # 4. CLASSIFIER MODEL
 # ─────────────────────────────────────────────
 
-MODEL_NAME = "dmis-lab/biobert-v1.1"   # [CHG v4] single place to change model
-
 
 class BertClassifier(nn.Module):
     def __init__(self, pretrained_model: AutoModel,
@@ -838,6 +850,7 @@ def run_benchmark(
     tome_r: int = 8,
     learning_rate: float = 2e-5,
     early_stopping_patience: int = 3,
+    MODEL_NAME: str = "bert-base-uncased",
     run_mode: str = "both",                    # [NEW v2] "baseline" | "tome" | "both"
 ) -> Tuple[Optional[BenchmarkResult], Optional[BenchmarkResult]]:
     """
@@ -1154,17 +1167,18 @@ class Config:
     fields = ["Title", "Abstract", "Keywords", "Aims"]  # Manually set your list
 
     # ── [NEW v2] run_mode: "baseline" | "tome" | "both" ─────────────────
-    run_mode = "both"
+    run_mode = "tome"
 
     # ── [NEW v2] Where session logs (.txt + .json) are written ──────────
     log_dir  = "/kaggle/working/logs"
 
-    num_epochs               = 10
-    batch_size               = 8
+    num_epochs               = 20
+    batch_size               = 32
     max_length               = 512
     tome_r                   = 8
     learning_rate            = 2e-5
     early_stopping_patience  = 3
+    MODEL_NAME               = "dmis-lab/biobert-v1.1"   # [CHG v4] single place to change model
 
 
 if __name__ == "__main__":
@@ -1199,6 +1213,7 @@ if __name__ == "__main__":
             tome_r=Config.tome_r,
             learning_rate=Config.learning_rate,
             early_stopping_patience=Config.early_stopping_patience,
+            MODEL_NAME=Config.MODEL_NAME,
             run_mode=Config.run_mode,              # [NEW v2]
         )
 
