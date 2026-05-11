@@ -74,6 +74,7 @@ from dataclasses import dataclass
 from sklearn.preprocessing import LabelEncoder
 from transformers import AutoTokenizer, AutoModel
 from torch.utils.data import Dataset, DataLoader
+from torch.amp import GradScaler, autocast
 
 
 # ─────────────────────────────────────────────
@@ -639,21 +640,53 @@ class BenchmarkResult:
     epochs_trained: int
 
 
-def train_one_epoch(model, loader, optimizer, criterion, device):
+def train_one_epoch(model, loader, optimizer, criterion, device, scaler = None, accum_steps = 1, log_every = 500):
     model.train()
     total_loss = 0
     epoch_start = time.perf_counter()
-    for batch in loader:
+    optimizer.zero_grad()
+    n_steps = len(loader)
+    
+    for step, batch in enumerate(loader):
         ids  = batch["input_ids"].to(device)
         mask = batch["attention_mask"].to(device)
         lbls = batch["labels"].to(device)
-        optimizer.zero_grad()
-        logits = model(ids, mask)
-        loss = criterion(logits, lbls)
-        loss.backward()
-        nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        optimizer.step()
-        total_loss += loss.item()
+
+        if scaler is not None:
+            with autocast(device_type=device.type):
+                logits = model(ids, mask)
+                loss = criterion(logits, lbls) / accum_steps
+            scaler.scale(loss).backward()
+
+            if (step + 1) % accum_steps == 0:
+                scaler.unscale_(optimizer)
+                nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
+        else:
+            logits = model(ids, mask)
+            loss = criterion(logits, lbls)
+            loss.backward()
+            if (step + 1) % accum_steps == 0:
+                nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+                optimizer.zero_grad()
+        total_loss += loss.item() * accum_steps  # scale back up for logging
+
+        if (step + 1) % log_every == 0 or (step + 1) == n_steps:
+            elapsed = time.perf_counter() - epoch_start
+            steps_done = step + 1
+            steps_left =  n_steps - steps_done
+            eta_s = (elapsed / steps_done) * steps_left if steps_done > 0 else 0
+            avg_loss = total_loss / steps_done
+            print(
+                f"    Step {steps_done}/{n_steps} "
+                f"| loss={avg_loss:.4f} "
+                f"| elapsed={elapsed/60:.1f}min "
+                f"| ETA={eta_s/60:.1f}min",
+                flush=True    # important: force flush so Kaggle shows it immediately
+            )
     epoch_time = time.perf_counter() - epoch_start
     return total_loss / len(loader), epoch_time
 
@@ -681,10 +714,11 @@ def evaluate(model, loader, device) -> Tuple[dict, float]:
             lbls = batch["labels"]
 
             t0 = time.perf_counter()
-            logits = model(ids, mask)
+            with autocast(device_type=device.type):
+                logits = model(ids, mask)
             latencies.append(time.perf_counter() - t0)
 
-            all_logits.append(logits.cpu())
+            all_logits.append(logits.float().cpu())
             all_labels.extend(lbls.tolist())
 
     all_logits = torch.cat(all_logits, dim=0)
@@ -960,9 +994,14 @@ def run_benchmark(
             tome_r           = tome_r,
         ).to(device)
 
+        if device.type == "cuda":
+            model.bert.gradient_checkpointing_enable()  # save VRAM with negligible speed impact
+            print("  [Enabled gradient checkpointing for BERT]")
+
         if torch.cuda.device_count() > 1:
             print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
             model = nn.DataParallel(model)
+        
         optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
         criterion = nn.CrossEntropyLoss()
         print(f"  [Model initialized]: {time.perf_counter() - t_init:.2f}s")
@@ -977,10 +1016,11 @@ def run_benchmark(
         best_model_state = None
         total_train_time = 0.0
 
+        scaler = GradScaler(device=device.type) if device.type == "cuda" else None
         for epoch in range(num_epochs):
             reset_tome_timer()
             print(f"Starting training epoch {epoch+1}...")
-            loss, epoch_time = train_one_epoch(model, train_loader, optimizer, criterion, device)
+            loss, epoch_time = train_one_epoch(model, train_loader, optimizer, criterion, device, scaler, accum_steps=1)
             print(f"Training epoch {epoch + 1} completed.")
             total_train_time += epoch_time
             epochs_trained   += 1
