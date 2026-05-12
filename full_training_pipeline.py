@@ -1,65 +1,7 @@
-"""
-Token Merging (ToMe) for Academic Paper Journal Classification
-==============================================================
-
-PIPELINE OVERVIEW:
-  1. Preprocess: configurable fields (e.g. Title, Abstract, Keywords, Aims,
-                 Categories) joined from paper dataset + optional journal
-                 dataset → combined text
-  2. Tokenize: text → token embeddings (via BERT)
-  3. [ToMe ON]  Merge similar tokens at each transformer layer → fewer tokens
-  4. [ToMe OFF] Standard attention over all tokens
-  5. CLS token → Linear classifier → journal label prediction
-  6. Compare: speed, memory, accuracy between both modes
-
-WHAT TOKEN MERGING DOES:
-  - At each BERT layer, finds pairs of tokens with highest cosine similarity
-  - Merges (averages) those token pairs → reduces sequence length progressively
-  - Fewer tokens = fewer attention computations = faster inference
-  - Accuracy trade-off is usually small (< 1-2%)
-
-CHANGES FROM v1:
-  - [FIX]  Shallow copy of model state dict replaced with copy.deepcopy()
-  - [FIX]  CLS token (index 0 in set A) is now protected from being merged
-  - [FIX]  attention_mask is now applied to attention scores (padding fix)
-  - [PERF] argsort computed once and sliced (was called twice)
-  - [NEW]  --fields  : choose any subset/order of input fields at the CLI
-  - [NEW]  --journal_csv : optional journal dataset to contribute Aims &
-           Categories; merged into paper splits by Label before text is built
-
-CHANGES FROM v2 (logging + run_mode):
-  - [NEW] TeeLogger: mirrors all stdout to a per-session .txt log file
-  - [NEW] save_session_log(): writes a structured .json log (config + results)
-  - [NEW] Config.run_mode: "baseline" | "tome" | "both"  controls which
-          models are trained; missing result is returned as None
-  - [NEW] Config.log_dir: directory where session logs are saved
-  - [CHG] run_benchmark() gains a run_mode parameter; return value is
-          (Optional[BenchmarkResult], Optional[BenchmarkResult]) — the
-          missing side is None when run_mode != "both"
-  - [CHG] __main__ block: initialises TeeLogger, passes run_mode, guards
-          print_comparison, and calls save_session_log at the end
-
-USAGE EXAMPLES:
-  # Default behaviour (Title + Abstract + Keywords)
-  python tome_bert_classifier.py --train_csv train.csv --val_csv val.csv --test_csv test.csv
-
-  # Add journal Aims and Categories after Keywords
-  python tome_bert_classifier.py ... --journal_csv journal.csv \
-      --fields Title Abstract Keywords Aims Categories
-
-  # Only Abstract + Aims (minimal input)
-  python tome_bert_classifier.py ... --journal_csv journal.csv \
-      --fields Abstract Aims
-
-  # Reorder: lead with Keywords
-  python tome_bert_classifier.py ... --journal_csv journal.csv \
-      --fields Keywords Title Abstract Aims Categories
-"""
-
-import os           # [NEW v2] needed for makedirs in TeeLogger + save_session_log
-import sys          # [NEW v2] needed for TeeLogger (sys.stdout redirect)
-import json         # [NEW v2] needed for save_session_log JSON dump
-import datetime     # [NEW v2] needed for session timestamp
+import os
+import sys
+import json
+import datetime
 import copy
 import time
 import math
@@ -95,12 +37,12 @@ DEFAULT_FIELDS: List[str] = PAPER_FIELDS
 
 
 # ─────────────────────────────────────────────
-# 0b. SESSION LOGGER  [NEW v2]
+# 0b. SESSION LOGGER
 # ─────────────────────────────────────────────
 
 class TeeLogger:
     """
-    [NEW v2] Mirrors every print() call to both the terminal and a .txt log
+    Mirrors every print() call to both the terminal and a .txt log
     file simultaneously by replacing sys.stdout.
 
     WHY HERE: Placing it right after constants means it is available before
@@ -403,7 +345,7 @@ def bipartite_soft_matching(
         # Best B-match and its index for every A token
         node_max, node_idx = scores.max(dim=-1)             # (B, |A|)
 
-        # ── [FIX] CLS protection ─────────────────────────────────────────
+        # ── CLS protection ─────────────────────────────────────────
         # The CLS token sits at sequence position 0 (even → A[0]).
         # Forcing its score to -inf guarantees it lands in unm_idx and
         # is never consumed by another token, preserving the classifier head.
@@ -564,11 +506,6 @@ class ToMeBertAttention(nn.Module):
         scale  = math.sqrt(self.attention_head_size)
         scores = torch.matmul(q, k.transpose(-1, -2)) / scale
 
-        # ── [FIX] Apply attention mask to prevent attending to padding ─────
-        # HuggingFace BertModel extends the mask to (B, 1, 1, T) with
-        # 0.0 for real tokens and -10000.0 for padding before passing it
-        # to the attention layers.  After token merging T becomes T', so
-        # we only apply the mask when the sequence length still matches.
         if attention_mask is not None and attention_mask.shape[-1] == scores.shape[-1]:
             scores = scores + attention_mask
         # ──────────────────────────────────────────────────────────────────
@@ -652,7 +589,7 @@ class BenchmarkResult:
     epochs_trained: int
 
 
-def train_one_epoch(model, loader, optimizer, criterion, device, scaler = None, accum_steps = 1, log_every = 500):
+def train_one_epoch(model, loader, optimizer, criterion, device, scaler = None, accum_steps = 1, log_every = 2000):
     model.train()
     total_loss = 0
     epoch_start = time.perf_counter()
@@ -754,7 +691,7 @@ def count_params(model) -> int:
 
 
 # ─────────────────────────────────────────────
-# 5b. SESSION LOG WRITER  [NEW v2]
+# 5b. SESSION LOG WRITER
 # ─────────────────────────────────────────────
 
 def save_session_log(
@@ -766,7 +703,7 @@ def save_session_log(
     session_id: str,
 ) -> str:
     """
-    [NEW v2] Write a structured JSON file capturing config + results for
+    Write a structured JSON file capturing config + results for
     this training session.
 
     WHY A SEPARATE FUNCTION: Keeps all serialisation logic in one place;
@@ -843,6 +780,8 @@ def run_benchmark(
     val_df: pd.DataFrame,
     test_df: pd.DataFrame,
     journal_df: Optional[pd.DataFrame] = None,
+    CACHE_DIR: str = None,
+    checkpoint_dir: str = None,
     fields: Optional[List[str]] = None,
     num_epochs: int = 10,
     batch_size: int = 16,
@@ -851,7 +790,8 @@ def run_benchmark(
     learning_rate: float = 2e-5,
     early_stopping_patience: int = 3,
     MODEL_NAME: str = "bert-base-uncased",
-    run_mode: str = "both",                    # [NEW v2] "baseline" | "tome" | "both"
+    run_mode: str = "both",
+    accum_steps: int = 1
 ) -> Tuple[Optional[BenchmarkResult], Optional[BenchmarkResult]]:
     """
     Trains and evaluates one or both models depending on run_mode:
@@ -875,7 +815,7 @@ def run_benchmark(
             Which model(s) to train and evaluate.
             "baseline" skips ToMe; "tome" skips baseline; "both" runs both.
         num_epochs / batch_size / max_length / tome_r / learning_rate /
-        early_stopping_patience: training hyper-parameters.
+        early_stopping_patience / accum_steps: training hyper-parameters.
 
     Returns:
         (baseline_result, tome_result) – either may be None depending on
@@ -892,9 +832,6 @@ def run_benchmark(
             f"Valid options are: {ALL_FIELDS}"
         )
 
-    # ── [NEW v2] Build the list of use_tome flags to iterate ────────────
-    # Map run_mode → the booleans passed to BertClassifier.
-    # "baseline" → [False], "tome" → [True], "both" → [False, True]
     _mode_map = {
         "baseline": [False],
         "tome":     [True],
@@ -957,7 +894,6 @@ def run_benchmark(
 
     # ── Datasets & Loaders ──────────────────────────────────────────────
     t_ds = time.perf_counter()
-    CACHE_DIR = "/kaggle/working/tokenized_cache"
     print(f"Starting pre-tokenization and saving to disk cache (dir: {CACHE_DIR})...")
     input_ids_tr, attn_tr, labels_tr = pretokenize_to_disk(
         X_train, y_train, tokenizer, max_length, CACHE_DIR, "train")
@@ -987,7 +923,6 @@ def run_benchmark(
     print(f"  [Created dataloaders]: {time.perf_counter() - t_dl:.2f}s")
     print(f"  Total preprocessing: {time.perf_counter() - t_preprocess:.2f}s\n")
 
-    # ── [CHG v2] Iterate only over modes_to_run (was hard-coded [False, True])
     results = []
     for use_tome in modes_to_run:
         if results:
@@ -1018,8 +953,6 @@ def run_benchmark(
         optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
         criterion = nn.CrossEntropyLoss()
         print(f"  [Model initialized]: {time.perf_counter() - t_init:.2f}s")
-        del base_model   # free the original base model — no longer needed
-        gc.collect()
         print(f"  [Base model deleted]: {time.perf_counter() - t_init:.2f}s")
 
         best_val_acc    = 0.0
@@ -1033,13 +966,13 @@ def run_benchmark(
         for epoch in range(num_epochs):
             reset_tome_timer()
             print(f"Starting training epoch {epoch+1}...")
-            loss, epoch_time = train_one_epoch(model, train_loader, optimizer, criterion, device, scaler, accum_steps=1)
+            loss, epoch_time = train_one_epoch(model, train_loader, optimizer, criterion, device, scaler, accum_steps)
             print(f"Training epoch {epoch + 1} completed.")
             total_train_time += epoch_time
             epochs_trained   += 1
 
             t_eval = time.perf_counter()
-            print(f"Starting evaluation on vadilation...")
+            print(f"Starting evaluation on validation...")
             val_metrics, _ = evaluate(model, val_loader, device)
             eval_time_s = time.perf_counter() - t_eval
             val_acc = val_metrics["top1"]
@@ -1062,9 +995,23 @@ def run_benchmark(
                 best_val_acc = val_acc
                 patience_counter = 0
                 best_epoch = epoch + 1
-                # [FIX] deepcopy instead of shallow .copy() — tensors are now independent
                 best_model_state = copy.deepcopy(model.state_dict())
-                print(" ✓")
+                # ── Save best checkpoint to disk ──────────────────────────
+                os.makedirs(checkpoint_dir, exist_ok=True)
+                ckpt_name = f"best_{'tome' if use_tome else 'baseline'}.pt"
+                ckpt_path = os.path.join(checkpoint_dir, ckpt_name)
+                torch.save({
+                    "epoch":      epoch + 1,
+                    "model_state_dict": best_model_state,
+                    "val_acc":    best_val_acc,
+                    "label_to_id": label_to_id,
+                    "config": {
+                        "tome_r": tome_r,
+                        "max_length": max_length,
+                        "num_labels": num_labels,
+                    }
+                }, ckpt_path)
+                print(f"  [Checkpoint saved → {ckpt_path}]")
             else:
                 patience_counter += 1
                 print(f" (patience: {patience_counter}/{early_stopping_patience})")
@@ -1153,7 +1100,6 @@ def print_comparison(baseline: BenchmarkResult, tome: BenchmarkResult):
     print(f"  Speed-up factor: {speedup:.2f}×")
     print("=" * 75)
 
-
 # ─────────────────────────────────────────────
 # 8. ENTRY POINT  [CHG v2]
 # ─────────────────────────────────────────────
@@ -1171,6 +1117,8 @@ class Config:
 
     # ── [NEW v2] Where session logs (.txt + .json) are written ──────────
     log_dir  = "/kaggle/working/logs"
+    CACHE_DIR = "/kaggle/working/tokenized_cache"
+    checkpoint_dir = "/kaggle/working/checkpoints"
 
     num_epochs               = 20
     batch_size               = 32
@@ -1178,14 +1126,14 @@ class Config:
     tome_r                   = 8
     learning_rate            = 2e-5
     early_stopping_patience  = 3
-    MODEL_NAME               = "dmis-lab/biobert-v1.1"   # [CHG v4] single place to change model
-
+    MODEL_NAME               = "dmis-lab/biobert-v1.1"
+    accum_steps              = 1  # Set >1 for gradient accumulation (save VRAM)
 
 if __name__ == "__main__":
-    # ── [NEW v2] Create a unique session ID from the current timestamp ───
+    # ── Create a unique session ID from the current timestamp ───
     session_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    # ── [NEW v2] Start TeeLogger — all prints below go to terminal + file
+    # ── Start TeeLogger — all prints below go to terminal + file
     log_txt_path = os.path.join(Config.log_dir, f"session_{session_id}.txt")
     logger = TeeLogger(log_txt_path)
     sys.stdout = logger
@@ -1206,6 +1154,8 @@ if __name__ == "__main__":
             val_df=val_df,
             test_df=test_df,
             journal_df=journal_df,
+            CACHE_DIR=Config.CACHE_DIR,
+            checkpoint_dir=Config.checkpoint_dir,
             fields=Config.fields,
             num_epochs=Config.num_epochs,
             batch_size=Config.batch_size,
@@ -1214,10 +1164,11 @@ if __name__ == "__main__":
             learning_rate=Config.learning_rate,
             early_stopping_patience=Config.early_stopping_patience,
             MODEL_NAME=Config.MODEL_NAME,
-            run_mode=Config.run_mode,              # [NEW v2]
+            run_mode=Config.run_mode,
+            accum_steps=Config.accum_steps,
         )
 
-        # ── [NEW v2] Only print comparison when both results exist ───────
+        # ── Only print comparison when both results exist ───────
         if baseline is not None and tome is not None:
             print_comparison(baseline, tome)
 
@@ -1226,7 +1177,7 @@ if __name__ == "__main__":
         print(f" TOTAL SCRIPT EXECUTION TIME: {total_time:.2f}s")
         print(f"{'='*55}")
 
-        # ── [NEW v2] Save structured JSON log ────────────────────────────
+        # ── Save structured JSON log ────────────────────────────
         save_session_log(
             config=Config,
             baseline=baseline,
