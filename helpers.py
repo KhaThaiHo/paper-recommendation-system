@@ -101,5 +101,11 @@ def parse_args():
 	parser.add_argument("--learning_rate", type=float, default=2e-5)
 	parser.add_argument("--early_stopping_patience", type=int, default=3)
 	parser.add_argument("--checkpoint_dir", type=str, default="./checkpoints")
+	parser.add_argument("--cache_dir", type=str, default="./tokenized_cache")
+	parser.add_argument("--model_name", type=str, default="bert-base-uncased")
+	parser.add_argument("--run_mode", type=str, default="both", choices=["baseline", "tome", "both"])
+	parser.add_argument("--accum_steps", type=int, default=1)
+	parser.add_argument("--log_every", type=int, default=2000)
+	parser.add_argument("--log_dir", type=str, default=None)
 
 	return parser.parse_args()

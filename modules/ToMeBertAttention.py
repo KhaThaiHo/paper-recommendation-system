@@ -102,9 +102,13 @@ class ToMeBertAttention(nn.Module):
             TOME_MERGE_TIME["call_count"] += 1
         # ────────────────────────────────────────────────────────────────
 
-        scale  = math.sqrt(self.attention_head_size)
+        scale = math.sqrt(self.attention_head_size)
         scores = torch.matmul(q, k.transpose(-1, -2)) / scale
-        probs  = nn.functional.softmax(scores, dim=-1)
+
+        if attention_mask is not None and attention_mask.shape[-1] == scores.shape[-1]:
+            scores = scores + attention_mask
+
+        probs = nn.functional.softmax(scores, dim=-1)
         probs  = self.dropout(probs)
         ctx    = torch.matmul(probs, v)                 # (B, H, T', d)
 
@@ -130,53 +134,52 @@ def patch_bert_with_tome(model: BertModel, r: int = 8) -> BertModel:
         layer.attention = ToMeBertAttention(layer.attention, r=r)
     return model
 
+
 def bipartite_soft_matching(
-    metric: Tensor,      # (B, T, C) – token features used for similarity
-    r: int,              # number of token pairs to merge per layer
+    metric: Tensor,
+    r: int,
 ) -> Tuple[Callable, Callable]:
     """
     Bipartite soft matching from the ToMe paper (Bolya et al., 2022).
 
-    Splits tokens into two sets (A and B), finds the most similar
-    cross-set pairs, and returns merge / unmerge functions.
+    Splits tokens into two sets (A = even indices, B = odd indices),
+    finds the most similar cross-set pairs, and returns merge / unmerge
+    functions.
 
     Returns:
-        merge   – callable that reduces token count by r
-        unmerge – callable that restores original positions (for viz)
+        merge   - callable that reduces token count by r
+        unmerge - callable that restores original positions (no-op)
     """
     B, T, _ = metric.shape
-    # Protect against r being too large
-    r = min(r, T // 2)
 
     with torch.no_grad():
-        metric = metric / (metric.norm(dim=-1, keepdim=True) + 1e-6)  # L2 norm
+        metric = metric / (metric.norm(dim=-1, keepdim=True) + 1e-6)
 
-        # Split into two halves: A (even indices), B (odd indices)
-        a, b = metric[..., ::2, :], metric[..., 1::2, :]  # (B, T/2, C)
+        a, b = metric[..., ::2, :], metric[..., 1::2, :]
+        scores = a @ b.transpose(-1, -2)
 
-        # Cosine similarity between every A–B pair
-        scores = a @ b.transpose(-1, -2)  # (B, T/2, T/2)
+        node_max, node_idx = scores.max(dim=-1)
 
-        # For each token in A, find its best match in B
-        node_max, node_idx = scores.max(dim=-1)   # (B, T/2)
+        node_max = node_max.clone()
+        node_max[:, 0] = -float("inf")
 
-        # Sort A tokens by their best-match score (descending)
-        edge_idx = node_max.argsort(dim=-1, descending=True)[..., :r]  # (B, r)
+        a_size = a.size(1)
+        r = min(r, a_size - 1)
 
-        # The B tokens they match with
-        unm_idx = node_max.argsort(dim=-1, descending=True)[..., r:]   # unmerged A
-        src_idx = edge_idx                                               # merged A
-        dst_idx = node_idx.gather(dim=-1, index=edge_idx)               # matched B
+        sorted_idx = node_max.argsort(dim=-1, descending=True)
+        src_idx = sorted_idx[..., :r]
+        unm_idx = sorted_idx[..., r:]
+        dst_idx = node_idx.gather(dim=-1, index=src_idx)
 
-    def merge(x: Tensor, mode="mean") -> Tensor:
-        """Merge r token pairs; returns tensor with T-r tokens."""
-        src, dst = x[..., ::2, :], x[..., 1::2, :].clone()  # split A/B
+    def merge(x: Tensor, mode: str = "mean") -> Tensor:
+        """Merge r token pairs; returns a tensor with T - r tokens."""
+        src, dst = x[..., ::2, :], x[..., 1::2, :].clone()
+        n, _, c = src.shape
+        n_unm = unm_idx.size(-1)
 
-        # Gather matched sources and accumulate into dst
-        n, t1, c = src.shape
         matched_src = src.gather(
             dim=-2,
-            index=src_idx.unsqueeze(-1).expand(n, r, c)
+            index=src_idx.unsqueeze(-1).expand(n, r, c),
         )
         if mode == "mean":
             dst.scatter_reduce_(
@@ -186,17 +189,13 @@ def bipartite_soft_matching(
                 reduce="mean",
                 include_self=True,
             )
-        # Unmerged A tokens
         unmerged = src.gather(
             dim=-2,
-            index=unm_idx.unsqueeze(-1).expand(n, t1 - r, c)
+            index=unm_idx.unsqueeze(-1).expand(n, n_unm, c),
         )
-        # Concatenate unmerged A with updated B
         return torch.cat([unmerged, dst], dim=1)
 
     def unmerge(x: Tensor) -> Tensor:
-        """Approximately restore original token positions (for inspection)."""
-        # Simple pass-through; full reconstruction requires storing indices
         return x
 
     return merge, unmerge

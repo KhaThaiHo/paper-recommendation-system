@@ -1,3 +1,6 @@
+import copy
+from typing import Optional
+
 import torch.nn as nn
 from transformers import BertModel
 
@@ -5,9 +8,19 @@ from .ToMeBertAttention import patch_bert_with_tome
 
 
 class BertClassifier(nn.Module):
-    def __init__(self, num_labels: int, use_tome: bool = False, tome_r: int = 8):
+    def __init__(
+        self,
+        num_labels: int,
+        use_tome: bool = False,
+        tome_r: int = 8,
+        model_name: str = "bert-base-uncased",
+        pretrained_model: Optional[BertModel] = None,
+    ):
         super().__init__()
-        self.bert = BertModel.from_pretrained("bert-base-uncased")
+        if pretrained_model is None:
+            self.bert = BertModel.from_pretrained(model_name)
+        else:
+            self.bert = copy.deepcopy(pretrained_model)
 
         if use_tome:
             self.bert = patch_bert_with_tome(self.bert, r=tome_r)

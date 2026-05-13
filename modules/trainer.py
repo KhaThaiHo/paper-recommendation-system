@@ -1,3 +1,4 @@
+import gc
 import os
 import time
 from typing import Optional
@@ -5,34 +6,74 @@ from typing import Optional
 import numpy as np
 import torch
 import torch.nn as nn
+from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
-from transformers import BertTokenizer
+from transformers import AutoTokenizer, BertModel
 
 from helpers import BenchmarkResult, count_params, peak_memory_mb
 from .BertClassifier import BertClassifier
-from .PaperDataset import PaperDataset
+from .PaperDataset import DiskDataset, PaperDataset, pretokenize_to_disk
 from .ToMeBertAttention import get_tome_timer_stats, reset_tome_timer
 from .preprocessing import PreprocessConfig, load_and_prepare_splits
 
 
-def train_one_epoch(model, loader, optimizer, criterion, device):
+def train_one_epoch(
+    model,
+    loader,
+    optimizer,
+    criterion,
+    device,
+    scaler: Optional[GradScaler] = None,
+    accum_steps: int = 1,
+    log_every: int = 2000,
+):
     model.train()
     total_loss = 0.0
     epoch_start = time.perf_counter()
+    optimizer.zero_grad()
+    n_steps = len(loader)
 
-    for batch in loader:
+    for step, batch in enumerate(loader):
         ids = batch["input_ids"].to(device)
         mask = batch["attention_mask"].to(device)
         labels = batch["labels"].to(device)
 
-        optimizer.zero_grad()
-        logits = model(ids, mask)
-        loss = criterion(logits, labels)
-        loss.backward()
-        nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        optimizer.step()
+        if scaler is not None:
+            with autocast(device_type=device.type):
+                logits = model(ids, mask)
+                loss = criterion(logits, labels) / accum_steps
+            scaler.scale(loss).backward()
 
-        total_loss += loss.item()
+            if (step + 1) % accum_steps == 0:
+                scaler.unscale_(optimizer)
+                nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
+        else:
+            logits = model(ids, mask)
+            loss = criterion(logits, labels) / accum_steps
+            loss.backward()
+            if (step + 1) % accum_steps == 0:
+                nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+                optimizer.zero_grad()
+
+        total_loss += loss.item() * accum_steps
+
+        if log_every > 0 and ((step + 1) % log_every == 0 or (step + 1) == n_steps):
+            elapsed = time.perf_counter() - epoch_start
+            steps_done = step + 1
+            steps_left = n_steps - steps_done
+            eta_s = (elapsed / steps_done) * steps_left if steps_done > 0 else 0
+            avg_loss = total_loss / steps_done
+            print(
+                f"    Step {steps_done}/{n_steps} "
+                f"| loss={avg_loss:.4f} "
+                f"| elapsed={elapsed/60:.1f}min "
+                f"| ETA={eta_s/60:.1f}min",
+                flush=True,
+            )
 
     epoch_time = time.perf_counter() - epoch_start
     return total_loss / max(len(loader), 1), epoch_time
@@ -62,10 +103,14 @@ def evaluate(model, loader, device) -> tuple[dict, float]:
             labels = batch["labels"]
 
             t0 = time.perf_counter()
-            logits = model(ids, mask)
+            if device.type == "cuda":
+                with autocast(device_type=device.type):
+                    logits = model(ids, mask)
+            else:
+                logits = model(ids, mask)
             latencies.append(time.perf_counter() - t0)
 
-            all_logits.append(logits.cpu())
+            all_logits.append(logits.float().cpu())
             all_labels.extend(labels.tolist())
 
     all_logits = torch.cat(all_logits, dim=0)
@@ -103,7 +148,12 @@ def run_benchmark(
     journal_label_col: str = "Categories",
     journal_category_col: str = "Categories",
     journal_scope_col: Optional[str] = None,
-) -> tuple[BenchmarkResult, Optional[BenchmarkResult]]:
+    cache_dir: Optional[str] = "./tokenized_cache",
+    model_name: str = "bert-base-uncased",
+    run_mode: str = "both",
+    accum_steps: int = 1,
+    log_every: int = 2000,
+) -> tuple[Optional[BenchmarkResult], Optional[BenchmarkResult]]:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"\nUsing device: {device}\n{'=' * 55}")
 
@@ -129,6 +179,10 @@ def run_benchmark(
         journal_path=journal_path,
     )
 
+    label_to_id = {
+        label: idx for idx, label in enumerate(prepared_data.label_encoder.classes_)
+    }
+
     print(f"Text combination: {text_combination.upper()}")
     print(f"Classes: {prepared_data.num_labels}")
     print(
@@ -138,14 +192,53 @@ def run_benchmark(
     )
 
     t_tokenize = time.perf_counter()
-    tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
-    print(f"  [Loaded tokenizer]: {time.perf_counter() - t_tokenize:.2f}s")
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    base_model = BertModel.from_pretrained(model_name)
+    print(f"  [Loaded tokenizer + base model]: {time.perf_counter() - t_tokenize:.2f}s")
 
-    t_dataset = time.perf_counter()
-    train_ds = PaperDataset(prepared_data.x_train, prepared_data.y_train, tokenizer, max_length)
-    val_ds = PaperDataset(prepared_data.x_val, prepared_data.y_val, tokenizer, max_length)
-    test_ds = PaperDataset(prepared_data.x_test, prepared_data.y_test, tokenizer, max_length)
-    print(f"  [Created datasets]: {time.perf_counter() - t_dataset:.2f}s")
+    use_disk_cache = bool(cache_dir)
+    if use_disk_cache:
+        os.makedirs(cache_dir, exist_ok=True)
+        t_dataset = time.perf_counter()
+        input_ids_tr, attn_tr, labels_tr = pretokenize_to_disk(
+            prepared_data.x_train,
+            prepared_data.y_train,
+            tokenizer,
+            max_length,
+            cache_dir,
+            "train",
+        )
+        input_ids_va, attn_va, labels_va = pretokenize_to_disk(
+            prepared_data.x_val,
+            prepared_data.y_val,
+            tokenizer,
+            max_length,
+            cache_dir,
+            "val",
+        )
+        input_ids_te, attn_te, labels_te = pretokenize_to_disk(
+            prepared_data.x_test,
+            prepared_data.y_test,
+            tokenizer,
+            max_length,
+            cache_dir,
+            "test",
+        )
+
+        train_ds = DiskDataset(input_ids_tr, attn_tr, labels_tr)
+        val_ds = DiskDataset(input_ids_va, attn_va, labels_va)
+        test_ds = DiskDataset(input_ids_te, attn_te, labels_te)
+        print(f"  [Created disk datasets]: {time.perf_counter() - t_dataset:.2f}s")
+
+        del prepared_data.x_train, prepared_data.x_val, prepared_data.x_test
+        del prepared_data.y_train, prepared_data.y_val, prepared_data.y_test
+        gc.collect()
+    else:
+        t_dataset = time.perf_counter()
+        train_ds = PaperDataset(prepared_data.x_train, prepared_data.y_train, tokenizer, max_length)
+        val_ds = PaperDataset(prepared_data.x_val, prepared_data.y_val, tokenizer, max_length)
+        test_ds = PaperDataset(prepared_data.x_test, prepared_data.y_test, tokenizer, max_length)
+        print(f"  [Created datasets]: {time.perf_counter() - t_dataset:.2f}s")
 
     t_loader = time.perf_counter()
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
@@ -154,9 +247,21 @@ def run_benchmark(
     print(f"  [Created dataloaders]: {time.perf_counter() - t_loader:.2f}s")
     print(f"  Total preprocessing & data prep: {time.perf_counter() - t_preprocess:.2f}s\n")
 
+    mode_map = {
+        "baseline": [False],
+        "tome": [True],
+        "both": [False, True],
+    }
+    if run_mode not in mode_map:
+        raise ValueError(f"Invalid run_mode='{run_mode}'. Choose from: {list(mode_map.keys())}")
+    modes_to_run = mode_map[run_mode]
+
     results: list[BenchmarkResult] = []
 
-    for use_tome in [False, True]:
+    for use_tome in modes_to_run:
+        if results:
+            torch.cuda.empty_cache()
+
         mode_name = "ToMe ON" if use_tome else "ToMe OFF"
         print(f"\n-- {mode_name} {'-' * 41}")
 
@@ -164,7 +269,22 @@ def run_benchmark(
             torch.cuda.reset_peak_memory_stats(device)
 
         t_init = time.perf_counter()
-        model = BertClassifier(prepared_data.num_labels, use_tome=use_tome, tome_r=tome_r).to(device)
+        model = BertClassifier(
+            prepared_data.num_labels,
+            use_tome=use_tome,
+            tome_r=tome_r,
+            model_name=model_name,
+            pretrained_model=base_model,
+        ).to(device)
+
+        if device.type == "cuda":
+            model.bert.gradient_checkpointing_enable()
+            print("  [Enabled gradient checkpointing for BERT]")
+
+        if torch.cuda.device_count() > 1:
+            print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
+            model = nn.DataParallel(model)
+
         optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
         criterion = nn.CrossEntropyLoss()
 
@@ -190,11 +310,22 @@ def run_benchmark(
         epochs_trained = 0
         best_epoch = 0
 
+        scaler = GradScaler(device=device.type) if device.type == "cuda" else None
+
         t_training_start = time.perf_counter()
         for epoch in range(start_epoch, num_epochs):
             reset_tome_timer()
 
-            loss, epoch_time = train_one_epoch(model, train_loader, optimizer, criterion, device)
+            loss, epoch_time = train_one_epoch(
+                model,
+                train_loader,
+                optimizer,
+                criterion,
+                device,
+                scaler=scaler,
+                accum_steps=accum_steps,
+                log_every=log_every,
+            )
             total_train_time += epoch_time
             epochs_trained += 1
 
@@ -227,6 +358,13 @@ def run_benchmark(
                     "optimizer_state_dict": optimizer.state_dict(),
                     "best_val_acc": best_val_acc,
                     "patience_counter": patience_counter,
+                    "label_to_id": label_to_id,
+                    "config": {
+                        "tome_r": tome_r,
+                        "max_length": max_length,
+                        "num_labels": prepared_data.num_labels,
+                        "model_name": model_name,
+                    },
                 },
                 last_checkpoint_path,
             )
@@ -237,6 +375,13 @@ def run_benchmark(
                         "model_state_dict": model.state_dict(),
                         "val_acc": val_acc,
                         "epoch": epoch,
+                        "label_to_id": label_to_id,
+                        "config": {
+                            "tome_r": tome_r,
+                            "max_length": max_length,
+                            "num_labels": prepared_data.num_labels,
+                            "model_name": model_name,
+                        },
                     },
                     best_checkpoint_path,
                 )
@@ -271,7 +416,7 @@ def run_benchmark(
             accuracy_top10=test_metrics["top10"],
             avg_inference_s=avg_s,
             peak_memory_mb=peak_memory_mb(device),
-            total_params=count_params(model),
+            total_params=count_params(model.module if isinstance(model, nn.DataParallel) else model),
             epochs_trained=epochs_trained,
         )
         results.append(result)

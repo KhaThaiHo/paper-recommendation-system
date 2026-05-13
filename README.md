@@ -2,8 +2,8 @@
 
 This project trains and benchmarks journal classification with:
 
-- Standard BERT (`ToMe OFF`)
-- BERT + Token Merging (`ToMe ON`)
+- Standard BERT (ToMe OFF)
+- BERT + Token Merging (ToMe ON)
 
 The main entrypoint is `main.py`.
 
@@ -11,7 +11,7 @@ The main entrypoint is `main.py`.
 
 - Windows 10/11
 - Python 3.10+
-- `pip`
+- pip
 
 ## 2) Environment Setup
 
@@ -19,22 +19,20 @@ Create and activate a virtual environment, then install dependencies:
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\Activate.ps1
+\.\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
 
 ## 3) Required Input Files
 
-You must provide 2 CSV files:
+You must provide 4 CSV files:
 
-1. full dataset (`--df_path`)
-2. journal metadata (`--journal_path`)
+1. Train split (`--train_path`)
+2. Validation split (`--val_path`)
+3. Test split (`--test_path`)
+4. Journal metadata (`--journal_path`)
 
-Optional for faster testing:
-
-- `--sample_size` to run on a smaller subset with label-aware sampling.
-
-### 3.1 Full Dataset Columns
+### 3.1 Paper split columns
 
 Required:
 
@@ -58,16 +56,7 @@ Scope/Aims column:
 - By default, `Aims` is used when `S` is selected in `--text_combination`.
 - You can override with `--journal_scope_col`.
 
-## 4) Preprocessing Behavior (Current)
-
-Preprocessing always does these steps:
-
-1. Load full dataset CSV.
-2. (Optional) sample a smaller subset while preserving label distribution.
-3. Split internally into train/val/test.
-4. Load journal CSV.
-5. Join each split with journal data by label.
-6. Build `text` field from selected feature codes in `--text_combination`.
+## 4) Text Combination Codes
 
 Feature code mapping:
 
@@ -83,15 +72,27 @@ Examples:
 - `CS` -> Journal Categories + Scope/Aims
 - `TAKCS` -> All fields combined
 
-## 5) Run Command (Exact)
+## 5) Run Command (PowerShell)
 
-Use this command format (PowerShell):
+Minimal example:
 
 ```powershell
 python main.py `
-  --df_path "D:\File\Preprocessed_data\train_set.csv" `
-  --journal_path "D:\File\Preprocessed_data\journal_category.csv" `
-  --sample_size 5000 `
+  --train_path "D:\File\data\train.csv" `
+  --val_path "D:\File\data\val.csv" `
+  --test_path "D:\File\data\test.csv" `
+  --journal_path "D:\File\data\journal.csv" `
+  --text_combination "TAK"
+```
+
+Full example:
+
+```powershell
+python main.py `
+  --train_path "D:\File\data\train.csv" `
+  --val_path "D:\File\data\val.csv" `
+  --test_path "D:\File\data\test.csv" `
+  --journal_path "D:\File\data\journal.csv" `
   --text_combination "TAKCS" `
   --label_col "Label" `
   --journal_label_col "Label" `
@@ -103,20 +104,21 @@ python main.py `
   --tome_r 8 `
   --learning_rate 2e-5 `
   --early_stopping_patience 3 `
-  --checkpoint_dir "./checkpoints"
-```
-
-Or on one line:
-
-```powershell
-python main.py --train_path "D:\File\data\train.csv" --val_path "D:\File\data\val.csv" --test_path "D:\File\data\test.csv" --journal_path "D:\File\data\journal.csv" --text_combination "TAKCS" --label_col "Label" --journal_label_col "Categories" --journal_category_col "Categories" --journal_scope_col "Aims" --num_epochs 20 --batch_size 8 --max_length 128 --tome_r 8 --learning_rate 2e-5 --early_stopping_patience 3 --checkpoint_dir "./checkpoints"
+  --checkpoint_dir "./checkpoints" `
+  --cache_dir "./tokenized_cache" `
+  --model_name "bert-base-uncased" `
+  --run_mode "both" `
+  --accum_steps 1 `
+  --log_dir "./logs"
 ```
 
 Notes:
 
 - `--journal_path` is required.
-- `--sample_size` is optional. If omitted, all rows from `--df_path` are used.
-- The run executes both `ToMe OFF` and `ToMe ON` sequentially.
+- `--run_mode` choices: `baseline`, `tome`, or `both` (default `both`).
+- `--cache_dir` enables disk token cache. Clear it if `--max_length` or `--text_combination` changes.
+- Use `--cache_dir ""` to disable disk cache and tokenize on the fly.
+- `--model_name` must be a BERT-compatible model.
 
 ## 6) What You Will See
 
@@ -124,10 +126,15 @@ Console output includes:
 
 - Dataset/preprocessing summary
 - Epoch-wise training + validation logs
-- Test metrics (`Top-1/3/5/10`)
+- Test metrics (Top-1/3/5/10)
 - Average inference time
 - Peak GPU memory (if CUDA is available)
-- Final comparison table (`ToMe OFF` vs `ToMe ON`)
+- Final comparison table (ToMe OFF vs ToMe ON)
+
+If `--log_dir` is set, two files are saved per run:
+
+- session_<timestamp>.txt (full console log)
+- session_<timestamp>.json (config + results)
 
 ## 7) Checkpoints
 
@@ -140,12 +147,12 @@ Saved in `--checkpoint_dir`:
 
 Error: missing column in split CSV
 
-- Ensure selected `--text_combination` columns exist in the full dataset.
+- Ensure selected `--text_combination` columns exist in the paper CSVs.
 
 Error: missing journal columns
 
 - Verify `--journal_label_col`, `--journal_category_col`, and `--journal_scope_col` names.
 
-No GPU.
+No GPU
 
 - Training still runs on CPU, but slower.
