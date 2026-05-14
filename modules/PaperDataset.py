@@ -48,6 +48,17 @@ def pretokenize_to_disk(texts, labels, tokenizer, max_length, cache_dir, split_n
     kaggle_labels_path = os.path.join(kaggle_cache_dir, f"{split_name}_labels.npy")
 
     if (
+        os.path.exists(input_ids_path)
+        and os.path.exists(attention_mask_path)
+        and os.path.exists(labels_path)
+    ):
+        print(f"  [Cache hit] Loading pre-tokenized {split_name} from disk ...")
+        input_ids = np.load(input_ids_path, mmap_mode="r")
+        attention_mask = np.load(attention_mask_path, mmap_mode="r")
+        labels_arr = np.load(labels_path)
+        return input_ids, attention_mask, labels_arr
+
+    if (
         os.path.exists(kaggle_input_ids_path)
         and os.path.exists(kaggle_attention_mask_path)
         and os.path.exists(kaggle_labels_path)
@@ -56,13 +67,6 @@ def pretokenize_to_disk(texts, labels, tokenizer, max_length, cache_dir, split_n
         input_ids = np.load(kaggle_input_ids_path, mmap_mode="r")
         attention_mask = np.load(kaggle_attention_mask_path, mmap_mode="r")
         labels_arr = np.load(kaggle_labels_path)
-        return input_ids, attention_mask, labels_arr
-
-    if os.path.exists(input_ids_path):
-        print(f"  [Cache hit] Loading pre-tokenized {split_name} from disk ...")
-        input_ids = np.load(input_ids_path, mmap_mode="r")
-        attention_mask = np.load(attention_mask_path, mmap_mode="r")
-        labels_arr = np.load(labels_path)
         return input_ids, attention_mask, labels_arr
 
     print(f"  [Pre-tokenizing {split_name}: {n} samples] ...")

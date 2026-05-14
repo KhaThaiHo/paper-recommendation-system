@@ -19,7 +19,7 @@ Create and activate a virtual environment, then install dependencies:
 
 ```powershell
 python -m venv .venv
-\.\.venv\Scripts\Activate.ps1
+.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
 
@@ -89,11 +89,11 @@ Full example:
 
 ```powershell
 python main.py `
-  --train_path "D:\File\data\train.csv" `
-  --val_path "D:\File\data\val.csv" `
-  --test_path "D:\File\data\test.csv" `
-  --journal_path "D:\File\data\journal.csv" `
-  --text_combination "TAKCS" `
+  --train_path "D:\File\Preprocessed_data\train_set.csv" `
+  --val_path "D:\File\Preprocessed_data\val_set.csv" `
+  --test_path "D:\File\Preprocessed_data\test_set.csv" `
+  --journal_path "D:\File\Preprocessed_data\journal_category.csv" `
+  --text_combination "TAKS" `
   --label_col "Label" `
   --journal_label_col "Label" `
   --journal_category_col "Categories" `
@@ -106,8 +106,8 @@ python main.py `
   --early_stopping_patience 3 `
   --checkpoint_dir "./checkpoints" `
   --cache_dir "./tokenized_cache" `
-  --model_name "bert-base-uncased" `
-  --run_mode "both" `
+  --model_name "dmis-lab/biobert-v1.1" `
+  --run_mode "tome" `
   --accum_steps 1 `
   --log_dir "./logs"
 ```
