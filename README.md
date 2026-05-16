@@ -93,7 +93,7 @@ python main.py `
   --val_path "D:\File\Preprocessed_data\val_set.csv" `
   --test_path "D:\File\Preprocessed_data\test_set.csv" `
   --journal_path "D:\File\Preprocessed_data\journal_category.csv" `
-  --text_combination "TAKS" `
+  --text_combination "TAK" `
   --label_col "Label" `
   --journal_label_col "Label" `
   --journal_category_col "Categories" `
