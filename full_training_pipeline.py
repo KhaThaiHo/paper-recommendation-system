@@ -775,6 +775,21 @@ def save_session_log(
 # 6. FULL BENCHMARK PIPELINE
 # ─────────────────────────────────────────────
 
+def _find_resume_checkpoint(
+    checkpoint_dir: Optional[str],
+    checkpoint_input_dir: Optional[str],
+    ckpt_name: str,
+) -> Optional[str]:
+    candidates = []
+    if checkpoint_dir:
+        candidates.append(os.path.join(checkpoint_dir, ckpt_name))
+    if checkpoint_input_dir and checkpoint_input_dir != checkpoint_dir:
+        candidates.append(os.path.join(checkpoint_input_dir, ckpt_name))
+    for path in candidates:
+        if path and os.path.exists(path):
+            return path
+    return None
+
 def run_benchmark(
     train_df: pd.DataFrame,
     val_df: pd.DataFrame,
@@ -782,6 +797,7 @@ def run_benchmark(
     journal_df: Optional[pd.DataFrame] = None,
     CACHE_DIR: str = None,
     checkpoint_dir: str = None,
+    checkpoint_input_dir: Optional[str] = None,
     fields: Optional[List[str]] = None,
     num_epochs: int = 10,
     batch_size: int = 16,
@@ -806,6 +822,9 @@ def run_benchmark(
             Optional journal DataFrame with [Label, Aims, Categories].
             When provided, Aims / Categories are left-joined into each
             paper split by Label before building the 'text' field.
+        checkpoint_input_dir:
+            Optional path to a read-only checkpoint directory (e.g. Kaggle
+            input dataset). Used when the working checkpoint_dir is empty.
         fields:
             Ordered list of column names to concatenate into 'text'.
             Defaults to DEFAULT_FIELDS = ["Title", "Abstract", "Keywords"].
@@ -962,8 +981,26 @@ def run_benchmark(
         best_model_state = None
         total_train_time = 0.0
 
+        ckpt_name = f"best_{'tome' if use_tome else 'baseline'}.pt"
+        resume_path = _find_resume_checkpoint(checkpoint_dir, checkpoint_input_dir, ckpt_name)
+        start_epoch = 0
+        if resume_path:
+            print(f"  [Resume] Loading checkpoint from {resume_path}")
+            checkpoint = torch.load(resume_path, map_location=device)
+            state_dict = (
+                checkpoint.get("model_state_dict")
+                if isinstance(checkpoint, dict)
+                else checkpoint
+            )
+            model.load_state_dict(state_dict)
+            if isinstance(checkpoint, dict):
+                best_val_acc = float(checkpoint.get("val_acc", 0.0))
+                best_epoch = int(checkpoint.get("epoch", 0))
+            best_model_state = copy.deepcopy(model.state_dict())
+            start_epoch = min(best_epoch, num_epochs)
+
         scaler = GradScaler(device=device.type) if device.type == "cuda" else None
-        for epoch in range(num_epochs):
+        for epoch in range(start_epoch, num_epochs):
             reset_tome_timer()
             print(f"Starting training epoch {epoch+1}...")
             loss, epoch_time = train_one_epoch(model, train_loader, optimizer, criterion, device, scaler, accum_steps)
@@ -1100,94 +1137,4 @@ def print_comparison(baseline: BenchmarkResult, tome: BenchmarkResult):
     print(f"  Speed-up factor: {speedup:.2f}×")
     print("=" * 75)
 
-# ─────────────────────────────────────────────
-# 8. ENTRY POINT  [CHG v2]
-# ─────────────────────────────────────────────
 
-class Config:
-    train_csv   = "/kaggle/input/datasets/basdong/paper-submission/train_set.csv"
-    val_csv     = "/kaggle/input/datasets/basdong/paper-submission/val_set.csv"
-    test_csv    = "/kaggle/input/datasets/basdong/paper-submission/test_set.csv"
-    journal_csv = "/kaggle/input/datasets/basdong/paper-submission/journal_category.csv"
-
-    fields = ["Title", "Abstract", "Keywords", "Aims"]  # Manually set your list
-
-    # ── [NEW v2] run_mode: "baseline" | "tome" | "both" ─────────────────
-    run_mode = "tome"
-
-    # ── [NEW v2] Where session logs (.txt + .json) are written ──────────
-    log_dir  = "/kaggle/working/logs"
-    CACHE_DIR = "/kaggle/working/tokenized_cache"
-    checkpoint_dir = "/kaggle/working/checkpoints"
-
-    num_epochs               = 20
-    batch_size               = 32
-    max_length               = 512
-    tome_r                   = 8
-    learning_rate            = 2e-5
-    early_stopping_patience  = 3
-    MODEL_NAME               = "dmis-lab/biobert-v1.1"
-    accum_steps              = 1  # Set >1 for gradient accumulation (save VRAM)
-
-if __name__ == "__main__":
-    # ── Create a unique session ID from the current timestamp ───
-    session_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-
-    # ── Start TeeLogger — all prints below go to terminal + file
-    log_txt_path = os.path.join(Config.log_dir, f"session_{session_id}.txt")
-    logger = TeeLogger(log_txt_path)
-    sys.stdout = logger
-    print(f"[Session {session_id}] Log file: {log_txt_path}")
-
-    try:
-        script_start = time.perf_counter()
-
-        # Load Data
-        train_df   = pd.read_csv(Config.train_csv)
-        val_df     = pd.read_csv(Config.val_csv)
-        test_df    = pd.read_csv(Config.test_csv)
-        journal_df = pd.read_csv(Config.journal_csv)
-
-        # Run Benchmark — pass run_mode so only requested models train
-        baseline, tome = run_benchmark(
-            train_df=train_df,
-            val_df=val_df,
-            test_df=test_df,
-            journal_df=journal_df,
-            CACHE_DIR=Config.CACHE_DIR,
-            checkpoint_dir=Config.checkpoint_dir,
-            fields=Config.fields,
-            num_epochs=Config.num_epochs,
-            batch_size=Config.batch_size,
-            max_length=Config.max_length,
-            tome_r=Config.tome_r,
-            learning_rate=Config.learning_rate,
-            early_stopping_patience=Config.early_stopping_patience,
-            MODEL_NAME=Config.MODEL_NAME,
-            run_mode=Config.run_mode,
-            accum_steps=Config.accum_steps,
-        )
-
-        # ── Only print comparison when both results exist ───────
-        if baseline is not None and tome is not None:
-            print_comparison(baseline, tome)
-
-        total_time = time.perf_counter() - script_start
-        print(f"\n{'='*55}")
-        print(f" TOTAL SCRIPT EXECUTION TIME: {total_time:.2f}s")
-        print(f"{'='*55}")
-
-        # ── Save structured JSON log ────────────────────────────
-        save_session_log(
-            config=Config,
-            baseline=baseline,
-            tome=tome,
-            total_time_s=total_time,
-            log_dir=Config.log_dir,
-            session_id=session_id,
-        )
-        print(f"[Log saved → TXT]  {log_txt_path}")
-
-    finally:
-        # Always restore stdout even if an exception occurred
-        logger.close()
