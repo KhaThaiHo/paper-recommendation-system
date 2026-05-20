@@ -86,7 +86,7 @@ def parse_args():
 	parser.add_argument("--train_path", type=str, required=True)
 	parser.add_argument("--val_path", type=str, required=True)
 	parser.add_argument("--test_path", type=str, required=True)
-	parser.add_argument("--journal_path", type=str, required=True)
+	parser.add_argument("--journal_path", type=str, default=None)
 
 	parser.add_argument("--text_combination", type=str, default="TAK")
 	parser.add_argument("--label_col", type=str, default="Label")

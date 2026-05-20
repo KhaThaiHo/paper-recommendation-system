@@ -28,12 +28,20 @@ def train_one_epoch(
     log_every: int = 2000,
 ):
     model.train()
+    if accum_steps < 1:
+        raise ValueError("accum_steps must be >= 1")
+
     total_loss = 0.0
     epoch_start = time.perf_counter()
     optimizer.zero_grad()
     n_steps = len(loader)
 
     for step, batch in enumerate(loader):
+        group_start = (step // accum_steps) * accum_steps
+        group_end = min(group_start + accum_steps, n_steps)
+        current_accum_steps = group_end - group_start
+        should_step = (step + 1) == group_end
+
         ids = batch["input_ids"].to(device)
         mask = batch["attention_mask"].to(device)
         labels = batch["labels"].to(device)
@@ -41,10 +49,11 @@ def train_one_epoch(
         if scaler is not None:
             with autocast(device_type=device.type):
                 logits = model(ids, mask)
-                loss = criterion(logits, labels) / accum_steps
+                raw_loss = criterion(logits, labels)
+                loss = raw_loss / current_accum_steps
             scaler.scale(loss).backward()
 
-            if (step + 1) % accum_steps == 0:
+            if should_step:
                 scaler.unscale_(optimizer)
                 nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 scaler.step(optimizer)
@@ -52,14 +61,15 @@ def train_one_epoch(
                 optimizer.zero_grad()
         else:
             logits = model(ids, mask)
-            loss = criterion(logits, labels) / accum_steps
+            raw_loss = criterion(logits, labels)
+            loss = raw_loss / current_accum_steps
             loss.backward()
-            if (step + 1) % accum_steps == 0:
+            if should_step:
                 nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
                 optimizer.zero_grad()
 
-        total_loss += loss.item() * accum_steps
+        total_loss += raw_loss.item()
 
         if log_every > 0 and ((step + 1) % log_every == 0 or (step + 1) == n_steps):
             elapsed = time.perf_counter() - epoch_start
@@ -158,9 +168,6 @@ def run_benchmark(
     print(f"\nUsing device: {device}\n{'=' * 55}")
 
     os.makedirs(checkpoint_dir, exist_ok=True)
-
-    if not journal_path:
-        raise ValueError("journal_path is required because preprocessing always joins train with journal data")
 
     preprocess_config = PreprocessConfig(
         text_combination=text_combination,
@@ -292,6 +299,7 @@ def run_benchmark(
 
         best_val_acc = 0.0
         patience_counter = 0
+        best_epoch = 0
         start_epoch = 0
 
         if os.path.exists(last_checkpoint_path):
@@ -302,13 +310,13 @@ def run_benchmark(
             start_epoch = checkpoint["epoch"] + 1
             best_val_acc = checkpoint["best_val_acc"]
             patience_counter = checkpoint["patience_counter"]
+            best_epoch = checkpoint.get("best_epoch", 0)
 
         t_init_s = time.perf_counter() - t_init
         print(f"  [Model initialized]: {t_init_s:.2f}s")
 
         total_train_time = 0.0
         epochs_trained = 0
-        best_epoch = 0
 
         scaler = GradScaler(device=device.type) if device.type == "cuda" else None
 
@@ -351,25 +359,11 @@ def run_benchmark(
                 end="",
             )
 
-            torch.save(
-                {
-                    "epoch": epoch,
-                    "model_state_dict": model.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict(),
-                    "best_val_acc": best_val_acc,
-                    "patience_counter": patience_counter,
-                    "label_to_id": label_to_id,
-                    "config": {
-                        "tome_r": tome_r,
-                        "max_length": max_length,
-                        "num_labels": prepared_data.num_labels,
-                        "model_name": model_name,
-                    },
-                },
-                last_checkpoint_path,
-            )
-
+            stop_training = False
             if val_acc > best_val_acc:
+                best_val_acc = val_acc
+                patience_counter = 0
+                best_epoch = epoch + 1
                 torch.save(
                     {
                         "model_state_dict": model.state_dict(),
@@ -385,16 +379,35 @@ def run_benchmark(
                     },
                     best_checkpoint_path,
                 )
-                best_val_acc = val_acc
-                patience_counter = 0
-                best_epoch = epoch + 1
                 print(" *")
             else:
                 patience_counter += 1
                 print(f" (patience: {patience_counter}/{early_stopping_patience})")
                 if patience_counter >= early_stopping_patience:
                     print(f"  Early stopping at epoch {epoch + 1} (best epoch: {best_epoch})")
-                    break
+                    stop_training = True
+
+            torch.save(
+                {
+                    "epoch": epoch,
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "best_val_acc": best_val_acc,
+                    "patience_counter": patience_counter,
+                    "best_epoch": best_epoch,
+                    "label_to_id": label_to_id,
+                    "config": {
+                        "tome_r": tome_r,
+                        "max_length": max_length,
+                        "num_labels": prepared_data.num_labels,
+                        "model_name": model_name,
+                    },
+                },
+                last_checkpoint_path,
+            )
+
+            if stop_training:
+                break
 
         training_duration = time.perf_counter() - t_training_start
         print(f"  [Training completed]: {training_duration:.2f}s ({epochs_trained} epochs)")

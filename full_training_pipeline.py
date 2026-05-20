@@ -227,6 +227,10 @@ def pretokenize_to_disk(texts, labels, tokenizer, max_length, save_dir, split_na
     Tokenize all texts once and save as memory-mapped numpy arrays.
     This lets the DataLoader read directly from disk with zero RAM overhead.
     """
+    from modules.PaperDataset import pretokenize_to_disk as checked_pretokenize_to_disk
+
+    return checked_pretokenize_to_disk(texts, labels, tokenizer, max_length, save_dir, split_name)
+
     os.makedirs(save_dir, exist_ok=True)
     n = len(texts)
 
@@ -532,9 +536,9 @@ def patch_bert_with_tome(model: AutoModel, r: int = 8) -> AutoModel:
     Patching the full block (not just self-attn) is required so that
     the residual connection is also merged to match the reduced T'.
     """
-    for layer in model.encoder.layer:
-        layer.attention = ToMeBertAttention(layer.attention, r=r)
-    return model
+    from modules.ToMeBertAttention import patch_bert_with_tome as patch_with_mask_propagation
+
+    return patch_with_mask_propagation(model, r=r)
 
 
 # ─────────────────────────────────────────────
@@ -590,6 +594,19 @@ class BenchmarkResult:
 
 
 def train_one_epoch(model, loader, optimizer, criterion, device, scaler = None, accum_steps = 1, log_every = 2000):
+    from modules.trainer import train_one_epoch as fixed_train_one_epoch
+
+    return fixed_train_one_epoch(
+        model,
+        loader,
+        optimizer,
+        criterion,
+        device,
+        scaler=scaler,
+        accum_steps=accum_steps,
+        log_every=log_every,
+    )
+
     model.train()
     total_loss = 0
     epoch_start = time.perf_counter()
@@ -849,6 +866,13 @@ def run_benchmark(
         raise ValueError(
             f"Unknown field(s): {unknown}. "
             f"Valid options are: {ALL_FIELDS}"
+        )
+    leaked_fields = sorted(set(fields) & {"Aims", "Categories"})
+    if leaked_fields:
+        raise ValueError(
+            "Do not include journal fields Aims/Categories when training a journal "
+            "classifier from paper information. They are joined by the true label "
+            f"and leak the answer. Use paper fields only. Found: {leaked_fields}"
         )
 
     _mode_map = {

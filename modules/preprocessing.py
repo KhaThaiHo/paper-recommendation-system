@@ -6,6 +6,7 @@ from sklearn.preprocessing import LabelEncoder
 
 
 ALLOWED_TEXT_CODES = {"T", "A", "K", "C", "S"}
+LABEL_DERIVED_TEXT_CODES = {"C", "S"}
 
 
 @dataclass
@@ -61,6 +62,14 @@ def _normalize_text_combination(text_combination: str) -> list[str]:
         if character not in seen:
             unique_letters.append(character)
             seen.add(character)
+
+    leaked = sorted(set(unique_letters) & LABEL_DERIVED_TEXT_CODES)
+    if leaked:
+        raise ValueError(
+            "text_combination cannot include C or S for journal classification. "
+            "Those fields are looked up from the true label before training/evaluation "
+            f"and would leak the answer. Use only T, A, K. Found: {leaked}"
+        )
     return unique_letters
 
 
@@ -101,10 +110,8 @@ def _attach_journal_features(
 def build_text_column(
     split_df: pd.DataFrame,
     config: PreprocessConfig,
-    journal_df: pd.DataFrame,
+    journal_df: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
-    merged_df = _attach_journal_features(split_df.copy(), journal_df, config)
-
     selected_codes = _normalize_text_combination(config.text_combination)
     code_to_column = {
         "T": "Title",
@@ -113,6 +120,14 @@ def build_text_column(
         "C": "journal_categories",
         "S": "journal_scope_aims",
     }
+    needs_journal = any(code in LABEL_DERIVED_TEXT_CODES for code in selected_codes)
+    if needs_journal:
+        if journal_df is None:
+            raise ValueError("journal_path is required when text_combination includes C or S")
+        merged_df = _attach_journal_features(split_df.copy(), journal_df, config)
+    else:
+        merged_df = split_df.copy()
+
     text_columns = [code_to_column[code] for code in selected_codes]
 
     _require_columns(merged_df, text_columns, "merged dataframe")
@@ -147,16 +162,13 @@ def load_and_prepare_splits(
     val_path: str,
     test_path: str,
     config: PreprocessConfig,
-    journal_path: str,
+    journal_path: Optional[str],
 ) -> PreparedDataBundle:
-    if not journal_path:
-        raise ValueError("journal_path is required because train/journal joining is always enabled")
-
     train_df = pd.read_csv(train_path)
     val_df = pd.read_csv(val_path)
     test_df = pd.read_csv(test_path)
 
-    journal_df = pd.read_csv(journal_path)
+    journal_df = pd.read_csv(journal_path) if journal_path else None
 
     train_df = build_text_column(train_df, config, journal_df=journal_df)
     val_df = build_text_column(val_df, config, journal_df=journal_df)

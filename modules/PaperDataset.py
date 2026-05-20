@@ -1,4 +1,7 @@
 import os
+import json
+import hashlib
+from typing import Optional
 
 import numpy as np
 import torch
@@ -30,6 +33,32 @@ class PaperDataset(Dataset):
         }
 
 
+def _hash_sequence(values) -> str:
+    digest = hashlib.sha256()
+    for value in values:
+        digest.update(str(value).encode("utf-8", errors="replace"))
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _cache_metadata(texts, labels, tokenizer, max_length, split_name) -> dict:
+    return {
+        "split_name": split_name,
+        "num_samples": len(texts),
+        "max_length": max_length,
+        "tokenizer_name": getattr(tokenizer, "name_or_path", tokenizer.__class__.__name__),
+        "texts_sha256": _hash_sequence(texts),
+        "labels_sha256": _hash_sequence(labels),
+    }
+
+
+def _load_json(path: str) -> Optional[dict]:
+    if not os.path.exists(path):
+        return None
+    with open(path, "r", encoding="utf-8") as file:
+        return json.load(file)
+
+
 def pretokenize_to_disk(texts, labels, tokenizer, max_length, cache_dir, split_name):
     """
     Tokenize all texts once and save as memory-mapped numpy arrays.
@@ -41,16 +70,14 @@ def pretokenize_to_disk(texts, labels, tokenizer, max_length, cache_dir, split_n
     input_ids_path = os.path.join(cache_dir, f"{split_name}_input_ids.npy")
     attention_mask_path = os.path.join(cache_dir, f"{split_name}_attention_mask.npy")
     labels_path = os.path.join(cache_dir, f"{split_name}_labels.npy")
-
-    kaggle_cache_dir = "/kaggle/input/datasets/khathih/tokenized-cache"
-    kaggle_input_ids_path = os.path.join(kaggle_cache_dir, f"{split_name}_input_ids.npy")
-    kaggle_attention_mask_path = os.path.join(kaggle_cache_dir, f"{split_name}_attention_mask.npy")
-    kaggle_labels_path = os.path.join(kaggle_cache_dir, f"{split_name}_labels.npy")
+    metadata_path = os.path.join(cache_dir, f"{split_name}_metadata.json")
+    expected_metadata = _cache_metadata(texts, labels, tokenizer, max_length, split_name)
 
     if (
         os.path.exists(input_ids_path)
         and os.path.exists(attention_mask_path)
         and os.path.exists(labels_path)
+        and _load_json(metadata_path) == expected_metadata
     ):
         print(f"  [Cache hit] Loading pre-tokenized {split_name} from disk ...")
         input_ids = np.load(input_ids_path, mmap_mode="r")
@@ -59,15 +86,11 @@ def pretokenize_to_disk(texts, labels, tokenizer, max_length, cache_dir, split_n
         return input_ids, attention_mask, labels_arr
 
     if (
-        os.path.exists(kaggle_input_ids_path)
-        and os.path.exists(kaggle_attention_mask_path)
-        and os.path.exists(kaggle_labels_path)
+        os.path.exists(input_ids_path)
+        or os.path.exists(attention_mask_path)
+        or os.path.exists(labels_path)
     ):
-        print(f"  [Cache hit] Loading pre-tokenized {split_name} from Kaggle cache ...")
-        input_ids = np.load(kaggle_input_ids_path, mmap_mode="r")
-        attention_mask = np.load(kaggle_attention_mask_path, mmap_mode="r")
-        labels_arr = np.load(kaggle_labels_path)
-        return input_ids, attention_mask, labels_arr
+        print(f"  [Cache stale] Re-tokenizing {split_name} because metadata changed ...")
 
     print(f"  [Pre-tokenizing {split_name}: {n} samples] ...")
     input_ids = np.lib.format.open_memmap(
@@ -93,6 +116,8 @@ def pretokenize_to_disk(texts, labels, tokenizer, max_length, cache_dir, split_n
             print(f"    ... {end}/{n}")
 
     np.save(labels_path, np.array(labels, dtype=np.int32))
+    with open(metadata_path, "w", encoding="utf-8") as file:
+        json.dump(expected_metadata, file, indent=2)
     print(f"  [Pre-tokenized {split_name} saved to {cache_dir}]")
 
     input_ids = np.load(input_ids_path, mmap_mode="r")
