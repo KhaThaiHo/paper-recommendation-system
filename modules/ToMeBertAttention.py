@@ -201,51 +201,56 @@ class ToMeBertEncoder(nn.Module):
             layer_head_mask = head_mask[i] if head_mask is not None else None
             past_key_value = past_key_values[i] if past_key_values is not None else None
 
+            def layer_call(
+                h,
+                attn_mask,
+                head_mask,
+                enc_h,
+                enc_attn_mask,
+                cache_pos=None,
+            ):
+                kwargs = {
+                    "attention_mask": attn_mask,
+                    "head_mask": head_mask,
+                    "encoder_hidden_states": enc_h,
+                    "encoder_attention_mask": enc_attn_mask,
+                    "output_attentions": output_attentions,
+                }
+                if past_key_value is not None:
+                    kwargs["past_key_value"] = past_key_value
+                if cache_pos is not None:
+                    kwargs["cache_position"] = cache_pos
+                try:
+                    return layer_module(h, **kwargs)
+                except TypeError:
+                    kwargs.pop("cache_position", None)
+                    return layer_module(h, **kwargs)
+
             if self.gradient_checkpointing and self.training:
                 checkpoint_fn = getattr(self, "_gradient_checkpointing_func", None)
-                if checkpoint_fn is not None:
-                    layer_outputs = checkpoint_fn(
-                        layer_module.__call__,
-                        hidden_states,
-                        current_attention_mask,
-                        layer_head_mask,
-                        encoder_hidden_states,
-                        encoder_attention_mask,
-                        past_key_value,
-                        output_attentions,
-                    )
-                else:
-                    layer_outputs = layer_module(
-                        hidden_states,
-                        current_attention_mask,
-                        layer_head_mask,
-                        encoder_hidden_states,
-                        encoder_attention_mask,
-                        past_key_value,
-                        output_attentions,
-                    )
+                if checkpoint_fn is None:
+                    checkpoint_fn = torch.utils.checkpoint.checkpoint
+
+                def custom_forward(h, attn_mask, head_mask, enc_h, enc_attn_mask):
+                    return layer_call(h, attn_mask, head_mask, enc_h, enc_attn_mask)
+
+                layer_outputs = checkpoint_fn(
+                    custom_forward,
+                    hidden_states,
+                    current_attention_mask,
+                    layer_head_mask,
+                    encoder_hidden_states,
+                    encoder_attention_mask,
+                )
             else:
-                try:
-                    layer_outputs = layer_module(
-                        hidden_states,
-                        current_attention_mask,
-                        layer_head_mask,
-                        encoder_hidden_states,
-                        encoder_attention_mask,
-                        past_key_value,
-                        output_attentions,
-                        cache_position=cache_position,
-                    )
-                except TypeError:
-                    layer_outputs = layer_module(
-                        hidden_states,
-                        current_attention_mask,
-                        layer_head_mask,
-                        encoder_hidden_states,
-                        encoder_attention_mask,
-                        past_key_value,
-                        output_attentions,
-                    )
+                layer_outputs = layer_call(
+                    hidden_states,
+                    current_attention_mask,
+                    layer_head_mask,
+                    encoder_hidden_states,
+                    encoder_attention_mask,
+                    cache_pos=cache_position,
+                )
 
             hidden_states = layer_outputs[0]
             current_attention_mask = getattr(
