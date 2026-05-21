@@ -183,6 +183,8 @@ class ToMeBertEncoder(nn.Module):
         output_hidden_states=False,
         return_dict=True,
         cache_position=None,
+        position_ids=None,
+        **kwargs,
     ):
         all_hidden_states = () if output_hidden_states else None
         all_self_attentions = () if output_attentions else None
