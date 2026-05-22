@@ -54,7 +54,12 @@ class ToMeBertAttention(nn.Module):
 
     def _transpose(self, x: Tensor) -> Tensor:
         new_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
-        return x.view(*new_shape).permute(0, 2, 1, 3)
+        
+        if x.is_sparse:
+            x = x.to_dense()
+        x = x.contiguous()
+
+        return x.reshape(*new_shape).permute(0, 2, 1, 3)
 
     @staticmethod
     def _merge_heads(x: Tensor, merge_fn: Callable) -> Tensor:
@@ -119,7 +124,7 @@ class ToMeBertAttention(nn.Module):
             v = self._merge_heads(v, merge_fn)
 
             # KEY FIX: merge residual to T' so sizes match for LayerNorm
-            residual = merge_fn(residual)               # (B, T', C)
+            residual = merge_fn(residual).contiguous()               # (B, T', C)
 
             if attention_mask is not None:
                 current_attention_mask = self._merge_attention_mask(attention_mask, merge_fn)
@@ -377,11 +382,12 @@ def bipartite_soft_matching(
             dim=1, index=order.unsqueeze(-1).expand(n, out_tokens.size(1), c),
         )
 
-        # restore CLS
-        return torch.cat(
-            [cls_x, merged],
-            dim=1,
-        )
+        out = torch.cat([cls_x, merged], dim=1)
+
+        if out.is_sparse:
+            out = out.to_dense()
+
+        return out.contiguous()
 
     def unmerge(x: Tensor):
         return x
