@@ -231,63 +231,63 @@ def pretokenize_to_disk(texts, labels, tokenizer, max_length, save_dir, split_na
 
     return checked_pretokenize_to_disk(texts, labels, tokenizer, max_length, save_dir, split_name)
 
-    os.makedirs(save_dir, exist_ok=True)
-    n = len(texts)
+    # os.makedirs(save_dir, exist_ok=True)
+    # n = len(texts)
 
-    input_ids_path      = os.path.join(save_dir, f"{split_name}_input_ids.npy")
-    attention_mask_path = os.path.join(save_dir, f"{split_name}_attention_mask.npy")
-    labels_path         = os.path.join(save_dir, f"{split_name}_labels.npy")
+    # input_ids_path      = os.path.join(save_dir, f"{split_name}_input_ids.npy")
+    # attention_mask_path = os.path.join(save_dir, f"{split_name}_attention_mask.npy")
+    # labels_path         = os.path.join(save_dir, f"{split_name}_labels.npy")
 
-    # Prefer pre-tokenized files from a Kaggle dataset cache if available.
-    kaggle_cache_dir = "/kaggle/input/datasets/khathih/tokenized-cache"
-    kaggle_input_ids_path      = os.path.join(kaggle_cache_dir, f"{split_name}_input_ids.npy")
-    kaggle_attention_mask_path = os.path.join(kaggle_cache_dir, f"{split_name}_attention_mask.npy")
-    kaggle_labels_path         = os.path.join(kaggle_cache_dir, f"{split_name}_labels.npy")
-    if (os.path.exists(kaggle_input_ids_path)
-            and os.path.exists(kaggle_attention_mask_path)
-            and os.path.exists(kaggle_labels_path)):
-        print(f"  [Cache hit] Loading pre-tokenized {split_name} from Kaggle cache …")
-        input_ids      = np.load(kaggle_input_ids_path,      mmap_mode="r")
-        attention_mask = np.load(kaggle_attention_mask_path, mmap_mode="r")
-        labels_arr     = np.load(kaggle_labels_path)
-        return input_ids, attention_mask, labels_arr
+    # # Prefer pre-tokenized files from a Kaggle dataset cache if available.
+    # kaggle_cache_dir = "/kaggle/input/datasets/khathih/tokenized-cache"
+    # kaggle_input_ids_path      = os.path.join(kaggle_cache_dir, f"{split_name}_input_ids.npy")
+    # kaggle_attention_mask_path = os.path.join(kaggle_cache_dir, f"{split_name}_attention_mask.npy")
+    # kaggle_labels_path         = os.path.join(kaggle_cache_dir, f"{split_name}_labels.npy")
+    # if (os.path.exists(kaggle_input_ids_path)
+    #         and os.path.exists(kaggle_attention_mask_path)
+    #         and os.path.exists(kaggle_labels_path)):
+    #     print(f"  [Cache hit] Loading pre-tokenized {split_name} from Kaggle cache …")
+    #     input_ids      = np.load(kaggle_input_ids_path,      mmap_mode="r")
+    #     attention_mask = np.load(kaggle_attention_mask_path, mmap_mode="r")
+    #     labels_arr     = np.load(kaggle_labels_path)
+    #     return input_ids, attention_mask, labels_arr
 
-    if os.path.exists(input_ids_path):
-        print(f"  [Cache hit] Loading pre-tokenized {split_name} from disk …")
-        input_ids      = np.load(input_ids_path,      mmap_mode="r")
-        attention_mask = np.load(attention_mask_path, mmap_mode="r")
-        labels_arr     = np.load(labels_path)
-        return input_ids, attention_mask, labels_arr
+    # if os.path.exists(input_ids_path):
+    #     print(f"  [Cache hit] Loading pre-tokenized {split_name} from disk …")
+    #     input_ids      = np.load(input_ids_path,      mmap_mode="r")
+    #     attention_mask = np.load(attention_mask_path, mmap_mode="r")
+    #     labels_arr     = np.load(labels_path)
+    #     return input_ids, attention_mask, labels_arr
 
-    print(f"  [Pre-tokenizing {split_name}: {n} samples] …")
-    # Allocate memmap arrays on disk — never fully loaded into RAM
-    input_ids      = np.lib.format.open_memmap(
-        input_ids_path, mode="w+", dtype=np.int32, shape=(n, max_length))
-    attention_mask = np.lib.format.open_memmap(
-        attention_mask_path, mode="w+", dtype=np.int8,  shape=(n, max_length))
+    # print(f"  [Pre-tokenizing {split_name}: {n} samples] …")
+    # # Allocate memmap arrays on disk — never fully loaded into RAM
+    # input_ids      = np.lib.format.open_memmap(
+    #     input_ids_path, mode="w+", dtype=np.int32, shape=(n, max_length))
+    # attention_mask = np.lib.format.open_memmap(
+    #     attention_mask_path, mode="w+", dtype=np.int8,  shape=(n, max_length))
 
-    CHUNK = 2000   # tokenize in chunks to control RAM usage
-    for start in range(0, n, CHUNK):
-        end   = min(start + CHUNK, n)
-        chunk = tokenizer(
-            texts[start:end],
-            padding        = "max_length",
-            truncation     = True,
-            max_length     = max_length,
-            return_tensors = "np",          # numpy, NOT torch — no GPU overhead
-        )
-        input_ids[start:end]      = chunk["input_ids"].astype(np.int32)
-        attention_mask[start:end] = chunk["attention_mask"].astype(np.int8)
-        if start % 50000 == 0:
-            print(f"    … {end}/{n}")
+    # CHUNK = 2000   # tokenize in chunks to control RAM usage
+    # for start in range(0, n, CHUNK):
+    #     end   = min(start + CHUNK, n)
+    #     chunk = tokenizer(
+    #         texts[start:end],
+    #         padding        = "max_length",
+    #         truncation     = True,
+    #         max_length     = max_length,
+    #         return_tensors = "np",          # numpy, NOT torch — no GPU overhead
+    #     )
+    #     input_ids[start:end]      = chunk["input_ids"].astype(np.int32)
+    #     attention_mask[start:end] = chunk["attention_mask"].astype(np.int8)
+    #     if start % 50000 == 0:
+    #         print(f"    … {end}/{n}")
 
-    np.save(labels_path, np.array(labels, dtype=np.int32))
-    print(f"  [Pre-tokenized {split_name} saved to {save_dir}]")
+    # np.save(labels_path, np.array(labels, dtype=np.int32))
+    # print(f"  [Pre-tokenized {split_name} saved to {save_dir}]")
 
-    input_ids      = np.load(input_ids_path,      mmap_mode="r")
-    attention_mask = np.load(attention_mask_path, mmap_mode="r")
-    labels_arr     = np.load(labels_path)
-    return input_ids, attention_mask, labels_arr
+    # input_ids      = np.load(input_ids_path,      mmap_mode="r")
+    # attention_mask = np.load(attention_mask_path, mmap_mode="r")
+    # labels_arr     = np.load(labels_path)
+    # return input_ids, attention_mask, labels_arr
 
 
 class DiskDataset(Dataset):

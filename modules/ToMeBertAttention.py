@@ -49,7 +49,6 @@ class ToMeBertAttention(nn.Module):
         self.out_dense     = original_bert_attention.output.dense
         self.out_dropout   = original_bert_attention.output.dropout
         self.out_LayerNorm = original_bert_attention.output.LayerNorm
-        self.last_attention_mask = None
 
     def _transpose(self, x: Tensor) -> Tensor:
         new_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
@@ -77,8 +76,11 @@ class ToMeBertAttention(nn.Module):
         else:
             return attention_mask
 
-        merged = merge_fn(mask.unsqueeze(-1), mode="max").squeeze(-1)
-        return merged[:, None, None, :]
+        binary_mask = (mask == 0).float()
+        merged = merge_fn(binary_mask.unsqueeze(-1), mode="max").squeeze(-1)
+
+        extended = (1.0 - merged) * -10000.0
+        return extended[:, None, None, :]
 
     def forward(
         self,
@@ -92,12 +94,13 @@ class ToMeBertAttention(nn.Module):
         output_attentions: bool = False,
         **kwargs,
     ):
-        self.last_attention_mask = attention_mask
         residual = hidden_states                        # save for skip-connection
 
         q = self._transpose(self.query(hidden_states))  # (B, H, T, d)
         k = self._transpose(self.key(hidden_states))
         v = self._transpose(self.value(hidden_states))
+
+        current_attention_mask = attention_mask
 
         # ── Token Merging ────────────────────────────────────────────────
         T = hidden_states.size(1)
@@ -106,7 +109,7 @@ class ToMeBertAttention(nn.Module):
             
             t_merge_start = time.perf_counter()
             
-            metric = k.mean(dim=1)                      # (B, T, d)
+            metric = hidden_states                     # (B, T, d)
             merge_fn, _ = bipartite_soft_matching(metric, self.r)
 
             q = self._merge_heads(q, merge_fn)          # (B, H, T', d)
@@ -117,8 +120,7 @@ class ToMeBertAttention(nn.Module):
             residual = merge_fn(residual)               # (B, T', C)
 
             if attention_mask is not None:
-                attention_mask = self._merge_attention_mask(attention_mask, merge_fn)
-                self.last_attention_mask = attention_mask
+                current_attention_mask = self._merge_attention_mask(attention_mask, merge_fn)
             
             t_merge_end = time.perf_counter()
             merge_time_s = t_merge_end - t_merge_start
@@ -129,15 +131,15 @@ class ToMeBertAttention(nn.Module):
         scale = math.sqrt(self.attention_head_size)
         scores = torch.matmul(q, k.transpose(-1, -2)) / scale
 
-        if attention_mask is not None and attention_mask.shape[-1] != scores.shape[-1]:
-            raise RuntimeError(
-                "ToMe attention mask length does not match merged sequence length: "
-                f"mask={attention_mask.shape[-1]}, scores={scores.shape[-1]}. "
-                "The reduced mask must be propagated between encoder layers."
-            )
+        if current_attention_mask is not None:
+            if current_attention_mask.shape[-1] != scores.shape[-1]:
+                raise RuntimeError(
+                    f"Mask mismatch: "
+                    f"{current_attention_mask.shape[-1]} vs "
+                    f"{scores.shape[-1]}"
+                )
 
-        if attention_mask is not None:
-            scores = scores + attention_mask
+            scores = scores + current_attention_mask
 
         probs = nn.functional.softmax(scores, dim=-1)
         probs  = self.dropout(probs)
@@ -153,7 +155,8 @@ class ToMeBertAttention(nn.Module):
         ctx = self.out_dropout(ctx)
         attention_output = self.out_LayerNorm(ctx + residual)  # both T'
 
-        outputs = (attention_output,)
+        outputs = (attention_output, current_attention_mask)
+
         if output_attentions:
             outputs = outputs + (probs,)
         return outputs
@@ -182,112 +185,89 @@ class ToMeBertEncoder(nn.Module):
         output_attentions=False,
         output_hidden_states=False,
         return_dict=True,
-        cache_position=None,
-        position_ids=None,
         **kwargs,
     ):
         all_hidden_states = () if output_hidden_states else None
         all_self_attentions = () if output_attentions else None
-        all_cross_attentions = (
-            () if output_attentions and getattr(self.config, "add_cross_attention", False) else None
-        )
-        next_decoder_cache = () if use_cache else None
         current_attention_mask = attention_mask
 
         for i, layer_module in enumerate(self.layer):
+
             if output_hidden_states:
-                all_hidden_states = all_hidden_states + (hidden_states,)
+                all_hidden_states += (hidden_states,)
 
-            layer_head_mask = head_mask[i] if head_mask is not None else None
-            past_key_value = past_key_values[i] if past_key_values is not None else None
+            layer_head_mask = (
+                head_mask[i]
+                if head_mask is not None
+                else None
+            )
 
-            def layer_call(
+            def layer_forward(
                 h,
                 attn_mask,
                 head_mask,
                 enc_h,
                 enc_attn_mask,
-                cache_pos=None,
             ):
-                kwargs = {
-                    "attention_mask": attn_mask,
-                    "head_mask": head_mask,
-                    "encoder_hidden_states": enc_h,
-                    "encoder_attention_mask": enc_attn_mask,
-                    "output_attentions": output_attentions,
-                }
-                if past_key_value is not None:
-                    kwargs["past_key_value"] = past_key_value
-                if cache_pos is not None:
-                    kwargs["cache_position"] = cache_pos
-                try:
-                    return layer_module(h, **kwargs)
-                except TypeError:
-                    kwargs.pop("cache_position", None)
-                    return layer_module(h, **kwargs)
+                return layer_module(
+                    h,
+                    attention_mask=attn_mask,
+                    head_mask=head_mask,
+                    encoder_hidden_states=enc_h,
+                    encoder_attention_mask=enc_attn_mask,
+                    output_attentions=output_attentions,
+                )
 
-            if self.gradient_checkpointing and self.training:
-                checkpoint_fn = getattr(self, "_gradient_checkpointing_func", None)
-                if checkpoint_fn is None:
-                    checkpoint_fn = torch.utils.checkpoint.checkpoint
-
-                def custom_forward(h, attn_mask, head_mask, enc_h, enc_attn_mask):
-                    return layer_call(h, attn_mask, head_mask, enc_h, enc_attn_mask)
-
-                layer_outputs = checkpoint_fn(
-                    custom_forward,
+            if (
+                self.gradient_checkpointing
+                and self.training
+            ):
+                layer_outputs = torch.utils.checkpoint.checkpoint(
+                    layer_forward,
                     hidden_states,
                     current_attention_mask,
                     layer_head_mask,
                     encoder_hidden_states,
                     encoder_attention_mask,
+                    use_reentrant=False,
                 )
             else:
-                layer_outputs = layer_call(
+                layer_outputs = layer_forward(
                     hidden_states,
                     current_attention_mask,
                     layer_head_mask,
                     encoder_hidden_states,
                     encoder_attention_mask,
-                    cache_pos=cache_position,
                 )
 
             hidden_states = layer_outputs[0]
-            current_attention_mask = getattr(
-                layer_module.attention,
-                "last_attention_mask",
-                current_attention_mask,
-            )
 
-            if use_cache:
-                next_decoder_cache = next_decoder_cache + (layer_outputs[-1],)
+            # propagated merged mask
+            current_attention_mask = layer_outputs[1]
+
             if output_attentions:
-                all_self_attentions = all_self_attentions + (layer_outputs[1],)
-                if getattr(self.config, "add_cross_attention", False):
-                    all_cross_attentions = all_cross_attentions + (layer_outputs[2],)
+                all_self_attentions += (
+                    layer_outputs[2],
+                )
 
         if output_hidden_states:
-            all_hidden_states = all_hidden_states + (hidden_states,)
+            all_hidden_states += (hidden_states,)
 
         if not return_dict:
             return tuple(
-                value
-                for value in [
+                v
+                for v in [
                     hidden_states,
-                    next_decoder_cache,
                     all_hidden_states,
                     all_self_attentions,
-                    all_cross_attentions,
                 ]
-                if value is not None
+                if v is not None
             )
 
         return BaseModelOutputWithPastAndCrossAttentions(
             last_hidden_state=hidden_states,
-            past_key_values=next_decoder_cache,
             hidden_states=all_hidden_states,
             attentions=all_self_attentions,
-            cross_attentions=all_cross_attentions,
         )
 
 
@@ -297,8 +277,12 @@ def patch_bert_with_tome(model: BertModel, r: int = 8) -> BertModel:
     Patching the full block (not just self-attn) is required so that
     the residual connection is also merged to match the reduced T'.
     """
-    for layer in model.encoder.layer:
-        layer.attention = ToMeBertAttention(layer.attention, r=r)
+    if isinstance(r, int):
+        r = [r] * len(model.encoder.layer)
+    
+    assert len(r) == len(model.encoder.layer)
+    for i, layer in enumerate(model.encoder.layer):
+        layer.attention = ToMeBertAttention(layer.attention, r=r[i])
     model.encoder = ToMeBertEncoder(model.encoder)
     return model
 
@@ -318,21 +302,37 @@ def bipartite_soft_matching(
         merge   - callable that reduces token count by r
         unmerge - callable that restores original positions (no-op)
     """
-    B, T, _ = metric.shape
+    B, T, C = metric.shape
+    if T <= 2 or r <= 0:
+        def identity(x, mode: str = "mean") -> Tensor:
+            return x
+        return identity, identity
 
     with torch.no_grad():
         metric = metric / (metric.norm(dim=-1, keepdim=True) + 1e-6)
 
-        a, b = metric[..., ::2, :], metric[..., 1::2, :]
-        scores = a @ b.transpose(-1, -2)
+        metric_wo_cls = metric[:, 1:, :]
+
+        a = metric_wo_cls[..., ::2, :]
+        b = metric_wo_cls[..., 1::2, :]
+
+        if b.size(1) == 0:
+            def identity(x, mode: str = "mean") -> Tensor:
+                return x
+            return identity, identity
+        scores = torch.matmul(a.float(), b.float().transpose(-1, -2))  # (B, T//2, T//2)
 
         node_max, node_idx = scores.max(dim=-1)
+        a_size = a.size(1)
+
+        r = min(r, a_size - 1)
+        
+        if r <= 0:
+            def identity(x, mode: str = "mean") -> Tensor:
+                return x
+            return identity, identity
 
         node_max = node_max.clone()
-        node_max[:, 0] = -float("inf")
-
-        a_size = a.size(1)
-        r = min(r, a_size - 1)
 
         sorted_idx = node_max.argsort(dim=-1, descending=True)
         src_idx = sorted_idx[..., :r]
@@ -341,7 +341,11 @@ def bipartite_soft_matching(
 
     def merge(x: Tensor, mode: str = "mean") -> Tensor:
         """Merge r token pairs; returns a tensor with T - r tokens."""
-        src, dst = x[..., ::2, :], x[..., 1::2, :].clone()
+        cls_x = x[:, :1, :]
+        x_wo_cls = x[:, 1:, :]
+
+        src, dst = x_wo_cls[..., ::2, :], x_wo_cls[..., 1::2, :].clone()
+
         n, _, c = src.shape
         n_unm = unm_idx.size(-1)
 
@@ -349,41 +353,41 @@ def bipartite_soft_matching(
             dim=-2,
             index=src_idx.unsqueeze(-1).expand(n, r, c),
         )
-        if mode == "mean":
-            dst.scatter_reduce_(
-                -2,
-                dst_idx.unsqueeze(-1).expand(n, r, c),
-                matched_src,
-                reduce="mean",
-                include_self=True,
-            )
-        elif mode == "max":
-            dst.scatter_reduce_(
-                -2,
-                dst_idx.unsqueeze(-1).expand(n, r, c),
-                matched_src,
-                reduce="amax",
-                include_self=True,
-            )
-        else:
-            raise ValueError(f"Unsupported merge mode: {mode}")
+        reduce_mode = ("mean" if mode == "mean" else "amax")
+
+        dst.scatter_reduce_(dim=-2, index=dst_idx.unsqueeze(-1).expand(n, r, c), src=matched_src, reduce=reduce_mode, include_self=True,)
+
         unmerged = src.gather(
             dim=-2,
             index=unm_idx.unsqueeze(-1).expand(n, n_unm, c),
         )
         pos_a = unm_idx * 2
-        pos_b = (torch.arange(dst.size(1), device=x.device)
-                 .unsqueeze(0)
-                 .expand(n, -1) * 2 + 1)
-        out_tokens = torch.cat([unmerged, dst], dim=1)
-        out_pos = torch.cat([pos_a, pos_b], dim=1)
-        order = out_pos.argsort(dim=-1)
-        return out_tokens.gather(
+
+        pos_b = (torch.arange(dst.size(1), device=x.device,).unsqueeze(0).expand(n, -1) * 2 + 1)
+
+        out_tokens = torch.cat(
+            [unmerged, dst],
             dim=1,
-            index=order.unsqueeze(-1).expand(n, out_tokens.size(1), c),
         )
 
-    def unmerge(x: Tensor) -> Tensor:
+        out_pos = torch.cat(
+            [pos_a, pos_b],
+            dim=1,
+        )
+
+        order = out_pos.argsort(dim=-1)
+
+        merged = out_tokens.gather(
+            dim=1, index=order.unsqueeze(-1).expand(n, out_tokens.size(1), c),
+        )
+
+        # restore CLS
+        return torch.cat(
+            [cls_x, merged],
+            dim=1,
+        )
+
+    def unmerge(x: Tensor):
         return x
 
     return merge, unmerge
