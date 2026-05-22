@@ -162,7 +162,10 @@ class ToMeBertAttention(nn.Module):
         outputs = (attention_output,)
 
         if output_attentions:
-            outputs = outputs + (probs,)
+            outputs = (attention_output, probs)
+        else:
+            outputs = (attention_output, None)
+
         return outputs
 
 
@@ -229,7 +232,7 @@ class ToMeBertEncoder(nn.Module):
                 encoder_hidden_states,
                 encoder_attention_mask,
             )
-            
+
             hidden_states = layer_outputs[0]
 
             current_attention_mask = getattr(
