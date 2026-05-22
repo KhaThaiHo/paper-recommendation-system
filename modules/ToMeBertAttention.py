@@ -50,6 +50,8 @@ class ToMeBertAttention(nn.Module):
         self.out_dropout   = original_bert_attention.output.dropout
         self.out_LayerNorm = original_bert_attention.output.LayerNorm
 
+        self.last_attention_mask = None
+
     def _transpose(self, x: Tensor) -> Tensor:
         new_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
         return x.view(*new_shape).permute(0, 2, 1, 3)
@@ -155,7 +157,9 @@ class ToMeBertAttention(nn.Module):
         ctx = self.out_dropout(ctx)
         attention_output = self.out_LayerNorm(ctx + residual)  # both T'
 
-        outputs = (attention_output, current_attention_mask)
+        self.last_attention_mask = current_attention_mask
+
+        outputs = (attention_output,)
 
         if output_attentions:
             outputs = outputs + (probs,)
@@ -218,32 +222,21 @@ class ToMeBertEncoder(nn.Module):
                     output_attentions=output_attentions,
                 )
 
-            if (
-                self.gradient_checkpointing
-                and self.training
-            ):
-                layer_outputs = torch.utils.checkpoint.checkpoint(
-                    layer_forward,
-                    hidden_states,
-                    current_attention_mask,
-                    layer_head_mask,
-                    encoder_hidden_states,
-                    encoder_attention_mask,
-                    use_reentrant=False,
-                )
-            else:
-                layer_outputs = layer_forward(
-                    hidden_states,
-                    current_attention_mask,
-                    layer_head_mask,
-                    encoder_hidden_states,
-                    encoder_attention_mask,
-                )
-
+            layer_outputs = layer_forward(
+                hidden_states,
+                current_attention_mask,
+                layer_head_mask,
+                encoder_hidden_states,
+                encoder_attention_mask,
+            )
+            
             hidden_states = layer_outputs[0]
 
-            # propagated merged mask
-            current_attention_mask = layer_outputs[1]
+            current_attention_mask = getattr(
+                layer_module.attention,
+                "last_attention_mask",
+                current_attention_mask,
+            )
 
             if output_attentions:
                 all_self_attentions += (
