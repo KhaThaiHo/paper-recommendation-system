@@ -74,18 +74,24 @@ class ToMeBertAttention(nn.Module):
     def _merge_attention_mask(attention_mask: Tensor, merge_fn: Callable) -> Tensor:
         """Merge the attention mask to match merged token length."""
         if attention_mask.dim() == 4:
-            if attention_mask.size(2) == 1:
-                mask = attention_mask[:, 0, 0, :]  # (B, T)
-            else:
-                mask = attention_mask[:, 0, 0, :]  # (B, T), key mask is shared by queries
+            # Extended mask from get_extended_attention_mask:
+            #   0.0 = valid token, -10000.0 = padding.
+            # Extract the per-token key mask (queries all share the same key mask).
+            mask = attention_mask[:, 0, 0, :]          # (B, T)
+            binary_mask = (mask == 0).float()           # 1.0 = valid, 0.0 = padding
         elif attention_mask.dim() == 2:
+            # Raw binary mask: 1 = valid, 0 = padding.
+            # BUG FIX: was `(mask == 0).float()` which inverted the meaning.
+            #   For raw mask,  1 → valid  so we keep it as-is.
             mask = attention_mask
+            binary_mask = mask.float()                  # 1.0 = valid, 0.0 = padding
         else:
             return attention_mask
 
-        binary_mask = (mask == 0).float()
+        # Merge: keep a position valid (1) if ANY merged token was valid.
         merged = merge_fn(binary_mask.unsqueeze(-1), mode="max").squeeze(-1)
 
+        # Convert back to extended format: valid → 0.0, padding → -10000.0
         extended = (1.0 - merged) * -10000.0
         return extended[:, None, None, :]
 
@@ -164,8 +170,6 @@ class ToMeBertAttention(nn.Module):
 
         self.last_attention_mask = current_attention_mask
 
-        outputs = (attention_output,)
-
         if output_attentions:
             outputs = (attention_output, probs)
         else:
@@ -208,38 +212,20 @@ class ToMeBertEncoder(nn.Module):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
-            layer_head_mask = (
-                head_mask[i]
-                if head_mask is not None
-                else None
-            )
+            layer_head_mask = head_mask[i] if head_mask is not None else None
 
-            def layer_forward(
-                h,
-                attn_mask,
-                head_mask,
-                enc_h,
-                enc_attn_mask,
-            ):
-                return layer_module(
-                    h,
-                    attention_mask=attn_mask,
-                    head_mask=head_mask,
-                    encoder_hidden_states=enc_h,
-                    encoder_attention_mask=enc_attn_mask,
-                    output_attentions=output_attentions,
-                )
-
-            layer_outputs = layer_forward(
+            layer_outputs = layer_module(
                 hidden_states,
-                current_attention_mask,
-                layer_head_mask,
-                encoder_hidden_states,
-                encoder_attention_mask,
+                attention_mask=current_attention_mask,
+                head_mask=layer_head_mask,
+                encoder_hidden_states=encoder_hidden_states,
+                encoder_attention_mask=encoder_attention_mask,
+                output_attentions=output_attentions,
             )
 
             hidden_states = layer_outputs[0]
 
+            # Propagate the (possibly reduced) attention mask to the next layer.
             current_attention_mask = getattr(
                 layer_module.attention,
                 "last_attention_mask",
@@ -247,9 +233,9 @@ class ToMeBertEncoder(nn.Module):
             )
 
             if output_attentions:
-                all_self_attentions += (
-                    layer_outputs[2],
-                )
+                # BUG FIX: layer_outputs has exactly 2 elements: (hidden, attn_probs).
+                # The original code used layer_outputs[2] which always raised IndexError.
+                all_self_attentions += (layer_outputs[1],)
 
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
