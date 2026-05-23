@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import torch
+import torch.nn as nn
 
 
 @dataclass
@@ -26,6 +27,36 @@ def peak_memory_mb(device) -> float:
 
 def count_params(model) -> int:
 	return sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
+
+def configure_gradient_checkpointing(model, use_gradient_checkpointing: bool):
+    """
+    Gradient checkpointing is NOT compatible with nn.DataParallel.
+
+    Enable only for:
+        - single GPU
+        - DistributedDataParallel
+
+    Disable for DataParallel to avoid invalid tensor layouts
+    and autograd corruption.
+    """
+
+    is_dataparallel = isinstance(model, nn.DataParallel)
+
+    if use_gradient_checkpointing and not is_dataparallel:
+        if hasattr(model, "gradient_checkpointing_enable"):
+            model.gradient_checkpointing_enable()
+
+        print("[Gradient checkpointing ENABLED]")
+
+    else:
+        if hasattr(model, "gradient_checkpointing_disable"):
+            model.gradient_checkpointing_disable()
+
+        if use_gradient_checkpointing and is_dataparallel:
+            print(
+                "[WARNING] Gradient checkpointing disabled because "
+                "nn.DataParallel is being used."
+            )
 
 
 def print_comparison(baseline: BenchmarkResult, tome: Optional[BenchmarkResult]) -> None:

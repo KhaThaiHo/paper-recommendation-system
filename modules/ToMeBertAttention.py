@@ -53,13 +53,19 @@ class ToMeBertAttention(nn.Module):
         self.last_attention_mask = None
 
     def _transpose(self, x: Tensor) -> Tensor:
-        new_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
-        
-        if x.is_sparse:
+        if x.layout != torch.strided:
             x = x.to_dense()
+
         x = x.contiguous()
 
-        return x.reshape(*new_shape).permute(0, 2, 1, 3)
+        new_shape = (
+            x.size(0),
+            x.size(1),
+            self.num_attention_heads,
+            self.attention_head_size,
+        )
+
+        return x.reshape(new_shape).permute(0, 2, 1, 3)
 
     @staticmethod
     def _merge_heads(x: Tensor, merge_fn: Callable) -> Tensor:

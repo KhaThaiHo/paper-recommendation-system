@@ -10,7 +10,7 @@ from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer, BertModel
 
-from helpers import BenchmarkResult, count_params, peak_memory_mb
+from helpers import BenchmarkResult, count_params, peak_memory_mb, configure_gradient_checkpointing
 from .BertClassifier import BertClassifier
 from .PaperDataset import DiskDataset, PaperDataset, pretokenize_to_disk
 from .ToMeBertAttention import get_tome_timer_stats, reset_tome_timer
@@ -284,13 +284,11 @@ def run_benchmark(
             pretrained_model=base_model,
         ).to(device)
 
-        if device.type == "cuda":
-            model.bert.gradient_checkpointing_enable()
-            print("  [Enabled gradient checkpointing for BERT]")
-
         if torch.cuda.device_count() > 1:
             print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
             model = nn.DataParallel(model)
+        
+        configure_gradient_checkpointing(model, use_gradient_checkpointing=True)
 
         optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
         criterion = nn.CrossEntropyLoss()
