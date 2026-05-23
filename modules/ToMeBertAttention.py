@@ -55,17 +55,9 @@ class ToMeBertAttention(nn.Module):
     def _transpose(self, x: Tensor) -> Tensor:
         if x.layout != torch.strided:
             x = x.to_dense()
-
         x = x.contiguous()
-
-        new_shape = (
-            x.size(0),
-            x.size(1),
-            self.num_attention_heads,
-            self.attention_head_size,
-        )
-
-        return x.reshape(new_shape).permute(0, 2, 1, 3)
+        new_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
+        return x.reshape(*new_shape).permute(0, 2, 1, 3)
 
     @staticmethod
     def _merge_heads(x: Tensor, merge_fn: Callable) -> Tensor:
@@ -376,7 +368,7 @@ def bipartite_soft_matching(
 
         out = torch.cat([cls_x, merged], dim=1)
 
-        if out.is_sparse:
+        if out.layout != torch.strided:
             out = out.to_dense()
 
         return out.contiguous()
