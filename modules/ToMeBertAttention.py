@@ -23,12 +23,17 @@ def get_tome_timer_stats() -> dict:
 
 def _to_dense_contiguous(x: Tensor) -> Tensor:
     """
-    Convert any non-strided (sparse) tensor to a dense, contiguous one.
-    Covers sparse_coo, sparse_csr, sparse_bsr, and any future layouts.
-    Using x.layout != torch.strided is the universal check — is_sparse only
-    catches sparse_coo and returns False for every other sparse format.
+    Guarantee a dense, contiguous (strided) tensor.
+
+    Why two checks?
+      - x.is_sparse     → True  only for sparse_coo (legacy flag).
+      - x.layout        → catches sparse_coo, sparse_csr, sparse_bsr, jagged,
+                          and any future non-strided layout.
+    In some Kaggle/PyTorch builds one of the two may behave unexpectedly, so
+    both are tested.  For a normal strided tensor both are False/strided and
+    the branch is skipped with no overhead.
     """
-    if x.layout != torch.strided:
+    if x.is_sparse or (x.layout != torch.strided):
         x = x.to_dense()
     if not x.is_contiguous():
         x = x.contiguous()
@@ -68,10 +73,36 @@ class ToMeBertAttention(nn.Module):
         self.last_attention_mask = None
 
     def _transpose(self, x: Tensor) -> Tensor:
-        # Densify first (belt-and-suspenders guard after the forward() entry guard).
+        """Project (B, T, C) → (B, H, T, d) with full sparse-safety."""
+        # ── Step 1: guarantee a dense, contiguous tensor ─────────────────
         x = _to_dense_contiguous(x)
-        new_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
-        return x.reshape(*new_shape).permute(0, 2, 1, 3)
+
+        # ── Step 2: hard guard — gives a clear diagnostic instead of the
+        #    cryptic "permute(sparse_coo)…" message if densification failed.
+        if x.layout != torch.strided or x.is_sparse:
+            raise RuntimeError(
+                f"_transpose: _to_dense_contiguous did not produce a strided "
+                f"tensor. layout={x.layout}, is_sparse={x.is_sparse}, "
+                f"shape={tuple(x.shape)}.  "
+                f"This is a PyTorch internals issue; please report the exact "
+                f"PyTorch version."
+            )
+
+        # ── Step 3: shape guard ───────────────────────────────────────────
+        if x.dim() != 3:
+            raise RuntimeError(
+                f"_transpose expected a 3-D tensor (B, T, C) but got "
+                f"{x.dim()}-D with shape {tuple(x.shape)}"
+            )
+
+        # ── Step 4: reshape + permute using view (requires contiguous) ────
+        # view() raises immediately on non-contiguous or sparse input, unlike
+        # reshape() which can silently return the original tensor for sparse.
+        B, T, _ = x.shape
+        return (
+            x.view(B, T, self.num_attention_heads, self.attention_head_size)
+            .permute(0, 2, 1, 3)
+        )
 
     @staticmethod
     def _merge_heads(x: Tensor, merge_fn: Callable) -> Tensor:
@@ -80,7 +111,7 @@ class ToMeBertAttention(nn.Module):
         x = x.permute(0, 2, 1, 3).reshape(B, T, H * d)
         x = merge_fn(x)
         T2 = x.size(1)
-        return x.reshape(B, T2, H, d).permute(0, 2, 1, 3)
+        return x.view(B, T2, H, d).permute(0, 2, 1, 3)
 
     @staticmethod
     def _merge_attention_mask(attention_mask: Tensor, merge_fn: Callable) -> Tensor:
@@ -88,20 +119,19 @@ class ToMeBertAttention(nn.Module):
         if attention_mask.dim() == 4:
             # Extended mask from get_extended_attention_mask:
             #   0.0 = valid token, -10000.0 = padding.
-            # Extract the per-token key mask (queries all share the same key mask).
-            mask = attention_mask[:, 0, 0, :]          # (B, T)
-            binary_mask = (mask == 0).float()           # 1.0 = valid, 0.0 = padding
+            mask = attention_mask[:, 0, 0, :]           # (B, T)
+            binary_mask = (mask == 0).float()            # 1.0 = valid, 0.0 = padding
         elif attention_mask.dim() == 2:
             # Raw binary mask: 1 = valid, 0 = padding.
             mask = attention_mask
-            binary_mask = mask.float()                  # 1.0 = valid, 0.0 = padding
+            binary_mask = mask.float()                   # 1.0 = valid, 0.0 = padding
         else:
             return attention_mask
 
-        # Merge: keep a position valid (1.0) if ANY merged token was valid.
+        # Keep a position valid (1.0) if ANY merged token was valid.
         merged = merge_fn(binary_mask.unsqueeze(-1), mode="max").squeeze(-1)
 
-        # Convert back to extended format: valid → 0.0, padding → -10000.0
+        # Convert back: valid → 0.0, padding → -10000.0
         extended = (1.0 - merged) * -10000.0
         return extended[:, None, None, :]
 
@@ -117,56 +147,50 @@ class ToMeBertAttention(nn.Module):
         output_attentions: bool = False,
         **kwargs,
     ):
-        # ROOT FIX: force hidden_states to be dense + contiguous at the entry
-        # point of every attention block.
+        # ── Dense guard at the entry point ────────────────────────────────
+        # This is the primary fix.  hidden_states must be dense before:
+        #   (a) the Q/K/V linear projections  — nn.Linear propagates sparsity
+        #   (b) the residual assignment       — used for skip-connection
+        #   (c) bipartite_soft_matching       — needs a dense metric tensor
         #
-        # Why here and not just in _transpose?
-        #   self.query(hidden_states) propagates sparsity — a sparse input to
-        #   nn.Linear produces a sparse output.  By densifying hidden_states
-        #   first we ensure that Q, K, V projections, the residual tensor, and
-        #   the ToMe similarity metric are ALL dense from the start.
-        #
-        # Why does hidden_states ever become sparse?
-        #   DataParallel scatter, gradient-checkpointing recomputation, or the
-        #   merge function's gather/scatter_reduce_ can produce tensors whose
-        #   memory layout is not torch.strided.  The helper _to_dense_contiguous
-        #   uses `layout != torch.strided` — the universal check that catches
-        #   sparse_coo, sparse_csr, sparse_bsr, and any future sparse format
-        #   (unlike `is_sparse` which only catches sparse_coo).
+        # Sources of non-strided hidden_states observed in practice:
+        #   • DataParallel scatter producing sparse-layout shards
+        #   • gather/scatter_reduce_ in the merge function returning non-strided
+        #     views under certain PyTorch builds
+        # ──────────────────────────────────────────────────────────────────
         hidden_states = _to_dense_contiguous(hidden_states)
 
-        residual = hidden_states                        # save for skip-connection
+        residual = hidden_states                         # (B, T, C) dense
 
-        q = self._transpose(self.query(hidden_states))  # (B, H, T, d)
+        q = self._transpose(self.query(hidden_states))   # (B, H, T, d)
         k = self._transpose(self.key(hidden_states))
         v = self._transpose(self.value(hidden_states))
 
         current_attention_mask = attention_mask
 
-        # ── Token Merging ────────────────────────────────────────────────
+        # ── Token Merging ─────────────────────────────────────────────────
         T = hidden_states.size(1)
         if self.r > 0 and T > 2:
             global TOME_MERGE_TIME
 
-            t_merge_start = time.perf_counter()
+            t0 = time.perf_counter()
 
-            metric = hidden_states                      # (B, T, d)
-            merge_fn, _ = bipartite_soft_matching(metric, self.r)
+            merge_fn, _ = bipartite_soft_matching(hidden_states, self.r)
 
-            q = self._merge_heads(q, merge_fn)          # (B, H, T', d)
+            q = self._merge_heads(q, merge_fn)           # (B, H, T', d)
             k = self._merge_heads(k, merge_fn)
             v = self._merge_heads(v, merge_fn)
 
-            # Merge residual to T' so sizes match for the LayerNorm add.
-            residual = merge_fn(residual).contiguous()  # (B, T', C)
+            residual = merge_fn(residual).contiguous()   # (B, T', C)
 
             if attention_mask is not None:
-                current_attention_mask = self._merge_attention_mask(attention_mask, merge_fn)
+                current_attention_mask = self._merge_attention_mask(
+                    attention_mask, merge_fn
+                )
 
-            t_merge_end = time.perf_counter()
-            TOME_MERGE_TIME["total_s"] += t_merge_end - t_merge_start
+            TOME_MERGE_TIME["total_s"] += time.perf_counter() - t0
             TOME_MERGE_TIME["call_count"] += 1
-        # ─────────────────────────────────────────────────────────────────
+        # ──────────────────────────────────────────────────────────────────
 
         scale = math.sqrt(self.attention_head_size)
         scores = torch.matmul(q, k.transpose(-1, -2)) / scale
@@ -174,9 +198,8 @@ class ToMeBertAttention(nn.Module):
         if current_attention_mask is not None:
             if current_attention_mask.shape[-1] != scores.shape[-1]:
                 raise RuntimeError(
-                    f"Mask mismatch: "
-                    f"{current_attention_mask.shape[-1]} vs "
-                    f"{scores.shape[-1]}"
+                    f"Attention mask length {current_attention_mask.shape[-1]} "
+                    f"does not match score length {scores.shape[-1]}"
                 )
             scores = scores + current_attention_mask
 
@@ -184,12 +207,12 @@ class ToMeBertAttention(nn.Module):
         probs = self.dropout(probs)
         if head_mask is not None:
             probs = probs * head_mask
-        ctx = torch.matmul(probs, v)                    # (B, H, T', d)
+        ctx = torch.matmul(probs, v)                     # (B, H, T', d)
 
         ctx = ctx.permute(0, 2, 1, 3).contiguous()
         ctx = ctx.view(ctx.size(0), ctx.size(1), self.all_head_size)
 
-        # BertSelfOutput: dense -> dropout -> LayerNorm(x + residual)
+        # BertSelfOutput: dense → dropout → LayerNorm(x + residual)
         ctx = self.out_dense(ctx)
         ctx = self.out_dropout(ctx)
         attention_output = self.out_LayerNorm(ctx + residual)  # both T'
@@ -197,11 +220,8 @@ class ToMeBertAttention(nn.Module):
         self.last_attention_mask = current_attention_mask
 
         if output_attentions:
-            outputs = (attention_output, probs)
-        else:
-            outputs = (attention_output, None)
-
-        return outputs
+            return (attention_output, probs)
+        return (attention_output, None)
 
 
 class ToMeBertEncoder(nn.Module):
@@ -211,9 +231,13 @@ class ToMeBertEncoder(nn.Module):
         super().__init__()
         self.config = original_encoder.config
         self.layer = original_encoder.layer
-        self.gradient_checkpointing = getattr(original_encoder, "gradient_checkpointing", False)
+        self.gradient_checkpointing = getattr(
+            original_encoder, "gradient_checkpointing", False
+        )
         if hasattr(original_encoder, "_gradient_checkpointing_func"):
-            self._gradient_checkpointing_func = original_encoder._gradient_checkpointing_func
+            self._gradient_checkpointing_func = (
+                original_encoder._gradient_checkpointing_func
+            )
 
     def forward(
         self,
@@ -251,7 +275,7 @@ class ToMeBertEncoder(nn.Module):
 
             hidden_states = layer_outputs[0]
 
-            # Propagate the (possibly reduced) attention mask to the next layer.
+            # Propagate the (possibly reduced) mask to the next layer.
             current_attention_mask = getattr(
                 layer_module.attention,
                 "last_attention_mask",
@@ -259,7 +283,7 @@ class ToMeBertEncoder(nn.Module):
             )
 
             if output_attentions:
-                # layer_outputs is (hidden_states, attn_probs) — exactly 2 elements.
+                # layer_outputs is exactly (hidden_states, attn_probs) — 2 elements.
                 all_self_attentions += (layer_outputs[1],)
 
         if output_hidden_states:
@@ -320,7 +344,6 @@ def bipartite_soft_matching(
         metric = metric / (metric.norm(dim=-1, keepdim=True) + 1e-6)
 
         metric_wo_cls = metric[:, 1:, :]
-
         a = metric_wo_cls[..., ::2, :]
         b = metric_wo_cls[..., 1::2, :]
 
@@ -329,7 +352,7 @@ def bipartite_soft_matching(
                 return x
             return identity, identity
 
-        scores = torch.matmul(a.float(), b.float().transpose(-1, -2))  # (B, a, b)
+        scores = torch.matmul(a.float(), b.float().transpose(-1, -2))
 
         node_max, node_idx = scores.max(dim=-1)
         a_size = a.size(1)
@@ -342,7 +365,6 @@ def bipartite_soft_matching(
             return identity, identity
 
         node_max = node_max.clone()
-
         sorted_idx = node_max.argsort(dim=-1, descending=True)
         src_idx = sorted_idx[..., :r]
         unm_idx = sorted_idx[..., r:]
@@ -350,23 +372,23 @@ def bipartite_soft_matching(
 
     def merge(x: Tensor, mode: str = "mean") -> Tensor:
         """Merge r token pairs; returns a tensor with T - r tokens."""
-        # Guard: ensure input is dense before any gather/scatter operations.
+        # Ensure dense input before any index / scatter operations.
         x = _to_dense_contiguous(x)
 
-        cls_x = x[:, :1, :]
+        cls_x    = x[:, :1, :]
         x_wo_cls = x[:, 1:, :]
 
-        src, dst = x_wo_cls[..., ::2, :], x_wo_cls[..., 1::2, :].clone()
+        src = x_wo_cls[..., ::2, :].contiguous()
+        dst = x_wo_cls[..., 1::2, :].clone()
 
         n, _, c = src.shape
-        n_unm = unm_idx.size(-1)
+        n_unm   = unm_idx.size(-1)
 
         matched_src = src.gather(
             dim=-2,
             index=src_idx.unsqueeze(-1).expand(n, r, c),
         )
         reduce_mode = "mean" if mode == "mean" else "amax"
-
         dst.scatter_reduce_(
             dim=-2,
             index=dst_idx.unsqueeze(-1).expand(n, r, c),
@@ -388,18 +410,17 @@ def bipartite_soft_matching(
         )
 
         out_tokens = torch.cat([unmerged, dst], dim=1)
-        out_pos = torch.cat([pos_a, pos_b], dim=1)
+        out_pos    = torch.cat([pos_a,    pos_b], dim=1)
 
-        order = out_pos.argsort(dim=-1)
+        order  = out_pos.argsort(dim=-1)
         merged = out_tokens.gather(
             dim=1,
             index=order.unsqueeze(-1).expand(n, out_tokens.size(1), c),
         )
 
         out = torch.cat([cls_x, merged], dim=1)
-
-        # Ensure output is always a dense strided tensor.
-        # `is_sparse` only catches sparse_coo; `layout != strided` catches all.
+        # Guarantee strided output: gather/scatter can produce non-strided
+        # tensors in certain PyTorch builds.
         return _to_dense_contiguous(out)
 
     def unmerge(x: Tensor) -> Tensor:
