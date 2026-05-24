@@ -101,21 +101,13 @@ class ToMeBertAttention(nn.Module):
             # dropped (shape mismatch guard below) and padding tokens receive
             # full attention weight throughout training.
             if attention_mask is not None:
-                # HuggingFace extended mask: (B, 1, 1, T), values 0 / -10000
-                # Reshape to (B, T, 1), apply merge with 'amax' so that a real
-                # token (0) merged with a padding token (-10000) stays real (0).
-                orig_mask_shape = attention_mask.shape
-                mask_1d = attention_mask.view(
-                    attention_mask.size(0), -1, 1
-                ).float()                                       # (B, T, 1) – squeeze middle dims
-                # 'amax' keeps the less-restrictive value (real wins over padding)
-                merged_mask = merge_fn(mask_1d, mode="amax")  # (B, T', 1)
-                # Restore to (B, 1, 1, T') so the add below works
-                attention_mask = merged_mask.view(
-                    orig_mask_shape[0],
-                    *orig_mask_shape[1:-1],
-                    merged_mask.size(1),
-                )
+                # AFTER — explicit indexing, handles both (B,1,1,T) and (B,1,T,T) safely
+                if attention_mask.dim() == 4 and attention_mask.shape[-2] == 1:
+                    # Standard HuggingFace extended mask: (B, 1, 1, T)
+                    mask_1d = attention_mask[:, 0, 0, :].unsqueeze(-1).float()  # (B, T, 1)
+                    merged_mask = merge_fn(mask_1d, mode="amax")                # (B, T', 1)
+                    attention_mask = merged_mask.squeeze(-1).unsqueeze(1).unsqueeze(1)  # (B, 1, 1, T')
+                # else: 2D mask shape (B, 1, T, T) — skip merging; shape-check below drops it gracefully
 
             t_merge_end = time.perf_counter()
             TOME_MERGE_TIME["total_s"]  += t_merge_end - t_merge_start

@@ -278,7 +278,7 @@ def run_benchmark(
         ).to(device)
 
         if device.type == "cuda":
-            model.bert.gradient_checkpointing_enable()
+            model.bert.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
             print("  [Enabled gradient checkpointing for BERT]")
 
         if torch.cuda.device_count() > 1:
