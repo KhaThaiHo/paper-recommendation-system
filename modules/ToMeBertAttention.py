@@ -107,7 +107,7 @@ class ToMeBertAttention(nn.Module):
                 orig_mask_shape = attention_mask.shape
                 mask_1d = attention_mask.view(
                     attention_mask.size(0), -1, 1
-                )                                       # (B, T, 1) – squeeze middle dims
+                ).float()                                       # (B, T, 1) – squeeze middle dims
                 # 'amax' keeps the less-restrictive value (real wins over padding)
                 merged_mask = merge_fn(mask_1d, mode="amax")  # (B, T', 1)
                 # Restore to (B, 1, 1, T') so the add below works
