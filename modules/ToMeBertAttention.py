@@ -1,6 +1,6 @@
 import math
 import time
-from typing import Callable, Tuple
+from typing import Callable, Optional, Tuple
 
 import torch
 from torch import Tensor
@@ -24,20 +24,50 @@ def get_tome_timer_stats() -> dict:
 def _to_dense_contiguous(x: Tensor) -> Tensor:
     """
     Guarantee a dense, contiguous (strided) tensor.
-
-    Why two checks?
-      - x.is_sparse     → True  only for sparse_coo (legacy flag).
-      - x.layout        → catches sparse_coo, sparse_csr, sparse_bsr, jagged,
-                          and any future non-strided layout.
-    In some Kaggle/PyTorch builds one of the two may behave unexpectedly, so
-    both are tested.  For a normal strided tensor both are False/strided and
-    the branch is skipped with no overhead.
+    Checks both x.is_sparse (sparse_coo legacy flag) and x.layout (catches
+    sparse_csr, sparse_bsr, jagged, and every other non-strided layout).
     """
     if x.is_sparse or (x.layout != torch.strided):
         x = x.to_dense()
     if not x.is_contiguous():
         x = x.contiguous()
     return x
+
+
+def _restore_3d(hidden_states: Tensor, mask_ref: Optional[Tensor]) -> Tensor:
+    """
+    Recover (B*T, C) → (B, T, C) using mask_ref to infer B and T.
+
+    Why does hidden_states ever become 2D?
+    ───────────────────────────────────────
+    With nn.DataParallel, intermediate activations produced by view() / reshape()
+    inside BertLayer (BertIntermediate, BertOutput, apply_chunking_to_forward)
+    can lose their batch dimension after the sequence length is changed by ToMe.
+    The attention mask is never reshaped this way, so its (B, 1, 1, T') shape
+    is a reliable reference for recovering B and T.
+    """
+    if hidden_states.dim() != 2:
+        return hidden_states  # already correct, nothing to do
+
+    if mask_ref is None:
+        raise RuntimeError(
+            f"hidden_states is 2D {tuple(hidden_states.shape)} and no attention "
+            f"mask is available to restore the batch dimension."
+        )
+
+    # Extended mask (B, 1, 1, T) or raw mask (B, T)
+    B = mask_ref.size(0)
+    T = mask_ref.size(-1)
+    BT, C = hidden_states.shape
+
+    if BT != B * T:
+        raise RuntimeError(
+            f"Cannot restore batch dim: hidden_states {tuple(hidden_states.shape)} "
+            f"is not divisible as B={B} × T={T} "
+            f"(from mask shape {tuple(mask_ref.shape)})."
+        )
+
+    return hidden_states.view(B, T, C)
 
 
 class ToMeBertAttention(nn.Module):
@@ -73,31 +103,13 @@ class ToMeBertAttention(nn.Module):
         self.last_attention_mask = None
 
     def _transpose(self, x: Tensor) -> Tensor:
-        """Project (B, T, C) → (B, H, T, d) with full sparse-safety."""
-        # ── Step 1: guarantee a dense, contiguous tensor ─────────────────
+        """Project (B, T, C) → (B, H, T, d)."""
         x = _to_dense_contiguous(x)
-
-        # ── Step 2: hard guard — gives a clear diagnostic instead of the
-        #    cryptic "permute(sparse_coo)…" message if densification failed.
-        if x.layout != torch.strided or x.is_sparse:
-            raise RuntimeError(
-                f"_transpose: _to_dense_contiguous did not produce a strided "
-                f"tensor. layout={x.layout}, is_sparse={x.is_sparse}, "
-                f"shape={tuple(x.shape)}.  "
-                f"This is a PyTorch internals issue; please report the exact "
-                f"PyTorch version."
-            )
-
-        # ── Step 3: shape guard ───────────────────────────────────────────
         if x.dim() != 3:
             raise RuntimeError(
-                f"_transpose expected a 3-D tensor (B, T, C) but got "
+                f"_transpose expected 3-D (B, T, C) but got "
                 f"{x.dim()}-D with shape {tuple(x.shape)}"
             )
-
-        # ── Step 4: reshape + permute using view (requires contiguous) ────
-        # view() raises immediately on non-contiguous or sparse input, unlike
-        # reshape() which can silently return the original tensor for sparse.
         B, T, _ = x.shape
         return (
             x.view(B, T, self.num_attention_heads, self.attention_head_size)
@@ -106,7 +118,7 @@ class ToMeBertAttention(nn.Module):
 
     @staticmethod
     def _merge_heads(x: Tensor, merge_fn: Callable) -> Tensor:
-        """(B, H, T, d) -> merge along T -> (B, H, T', d)"""
+        """(B, H, T, d) → merge along T → (B, H, T', d)."""
         B, H, T, d = x.shape
         x = x.permute(0, 2, 1, 3).reshape(B, T, H * d)
         x = merge_fn(x)
@@ -117,21 +129,17 @@ class ToMeBertAttention(nn.Module):
     def _merge_attention_mask(attention_mask: Tensor, merge_fn: Callable) -> Tensor:
         """Merge the attention mask to match merged token length."""
         if attention_mask.dim() == 4:
-            # Extended mask from get_extended_attention_mask:
-            #   0.0 = valid token, -10000.0 = padding.
+            # Extended mask: 0.0 = valid, -10000.0 = padding.
             mask = attention_mask[:, 0, 0, :]           # (B, T)
             binary_mask = (mask == 0).float()            # 1.0 = valid, 0.0 = padding
         elif attention_mask.dim() == 2:
             # Raw binary mask: 1 = valid, 0 = padding.
             mask = attention_mask
-            binary_mask = mask.float()                   # 1.0 = valid, 0.0 = padding
+            binary_mask = mask.float()
         else:
             return attention_mask
 
-        # Keep a position valid (1.0) if ANY merged token was valid.
         merged = merge_fn(binary_mask.unsqueeze(-1), mode="max").squeeze(-1)
-
-        # Convert back: valid → 0.0, padding → -10000.0
         extended = (1.0 - merged) * -10000.0
         return extended[:, None, None, :]
 
@@ -147,20 +155,19 @@ class ToMeBertAttention(nn.Module):
         output_attentions: bool = False,
         **kwargs,
     ):
-        # ── Dense guard at the entry point ────────────────────────────────
-        # This is the primary fix.  hidden_states must be dense before:
-        #   (a) the Q/K/V linear projections  — nn.Linear propagates sparsity
-        #   (b) the residual assignment       — used for skip-connection
-        #   (c) bipartite_soft_matching       — needs a dense metric tensor
-        #
-        # Sources of non-strided hidden_states observed in practice:
-        #   • DataParallel scatter producing sparse-layout shards
-        #   • gather/scatter_reduce_ in the merge function returning non-strided
-        #     views under certain PyTorch builds
-        # ──────────────────────────────────────────────────────────────────
+        # ── Guard 1: dense ───────────────────────────────────────────────
+        # nn.Linear propagates sparsity, so densify before any projection.
         hidden_states = _to_dense_contiguous(hidden_states)
 
-        residual = hidden_states                         # (B, T, C) dense
+        # ── Guard 2: shape ───────────────────────────────────────────────
+        # DataParallel + ToMe's variable-length sequences can cause BertLayer's
+        # FFN (view/reshape inside BertIntermediate / BertOutput) to collapse
+        # (B, T, C) → (B*T, C).  The attention mask retains the correct shape,
+        # so we use it to recover the batch dimension.
+        if hidden_states.dim() == 2:
+            hidden_states = _restore_3d(hidden_states, attention_mask)
+
+        residual = hidden_states                         # (B, T, C) — saved for skip-connection
 
         q = self._transpose(self.query(hidden_states))   # (B, H, T, d)
         k = self._transpose(self.key(hidden_states))
@@ -199,7 +206,7 @@ class ToMeBertAttention(nn.Module):
             if current_attention_mask.shape[-1] != scores.shape[-1]:
                 raise RuntimeError(
                     f"Attention mask length {current_attention_mask.shape[-1]} "
-                    f"does not match score length {scores.shape[-1]}"
+                    f"!= score length {scores.shape[-1]}"
                 )
             scores = scores + current_attention_mask
 
@@ -274,6 +281,18 @@ class ToMeBertEncoder(nn.Module):
             )
 
             hidden_states = layer_outputs[0]
+
+            # ── Shape guard ───────────────────────────────────────────────
+            # If BertLayer's FFN collapsed (B, T', C) → (B*T', C), restore it
+            # here before the next iteration.  We use last_attention_mask from
+            # the ToMeBertAttention that just ran — it holds the merged mask
+            # (B, 1, 1, T') which encodes both B and T'.
+            if hidden_states.dim() == 2:
+                merged_mask = getattr(
+                    layer_module.attention, "last_attention_mask", None
+                )
+                hidden_states = _restore_3d(hidden_states, merged_mask)
+            # ─────────────────────────────────────────────────────────────
 
             # Propagate the (possibly reduced) mask to the next layer.
             current_attention_mask = getattr(
@@ -372,7 +391,6 @@ def bipartite_soft_matching(
 
     def merge(x: Tensor, mode: str = "mean") -> Tensor:
         """Merge r token pairs; returns a tensor with T - r tokens."""
-        # Ensure dense input before any index / scatter operations.
         x = _to_dense_contiguous(x)
 
         cls_x    = x[:, :1, :]
@@ -419,8 +437,6 @@ def bipartite_soft_matching(
         )
 
         out = torch.cat([cls_x, merged], dim=1)
-        # Guarantee strided output: gather/scatter can produce non-strided
-        # tensors in certain PyTorch builds.
         return _to_dense_contiguous(out)
 
     def unmerge(x: Tensor) -> Tensor:
