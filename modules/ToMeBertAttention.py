@@ -93,12 +93,32 @@ class ToMeBertAttention(nn.Module):
             k = self._merge_heads(k, merge_fn)
             v = self._merge_heads(v, merge_fn)
 
-            # KEY FIX: merge residual to T' so sizes match for LayerNorm
+            # Merge residual to T' so sizes match for LayerNorm
             residual = merge_fn(residual)               # (B, T', C)
-            
+
+            # FIX 2: Also merge the attention mask so padding stays masked
+            # after token reduction. Without this, the mask is silently
+            # dropped (shape mismatch guard below) and padding tokens receive
+            # full attention weight throughout training.
+            if attention_mask is not None:
+                # HuggingFace extended mask: (B, 1, 1, T), values 0 / -10000
+                # Reshape to (B, T, 1), apply merge with 'amax' so that a real
+                # token (0) merged with a padding token (-10000) stays real (0).
+                orig_mask_shape = attention_mask.shape
+                mask_1d = attention_mask.view(
+                    attention_mask.size(0), -1, 1
+                )                                       # (B, T, 1) – squeeze middle dims
+                # 'amax' keeps the less-restrictive value (real wins over padding)
+                merged_mask = merge_fn(mask_1d, mode="amax")  # (B, T', 1)
+                # Restore to (B, 1, 1, T') so the add below works
+                attention_mask = merged_mask.view(
+                    orig_mask_shape[0],
+                    *orig_mask_shape[1:-1],
+                    merged_mask.size(1),
+                )
+
             t_merge_end = time.perf_counter()
-            merge_time_s = t_merge_end - t_merge_start
-            TOME_MERGE_TIME["total_s"] += merge_time_s
+            TOME_MERGE_TIME["total_s"]  += t_merge_end - t_merge_start
             TOME_MERGE_TIME["call_count"] += 1
         # ────────────────────────────────────────────────────────────────
 
@@ -142,26 +162,51 @@ def bipartite_soft_matching(
     """
     Bipartite soft matching from the ToMe paper (Bolya et al., 2022).
 
-    Splits tokens into two sets (A = even indices, B = odd indices),
-    finds the most similar cross-set pairs, and returns merge / unmerge
-    functions.
+    Splits the *body* tokens (everything after CLS) into two sets
+    (A = even body indices, B = odd body indices), finds the most similar
+    cross-set pairs, and returns merge / unmerge functions.
+
+    FIX 1 – CLS position: the original code protected CLS from being a
+    *source* (via node_max[:, 0] = -inf) but still let argsort reorder it.
+    Because argsort(descending=True) pushes -inf to the tail, CLS ended up
+    somewhere in the middle of the output — not at position 0. BERT's pooler
+    reads sequence_output[:, 0], so it was classifying on a random body
+    token instead of CLS.
+
+    The fix is to exclude CLS entirely from the A/B partitioning and always
+    prepend it at position 0 in the merge output.
+
+    FIX 3 (minor) – SEP protection: SEP tokens (last non-padding token) are
+    excluded from being sources by setting their score to -inf. They carry
+    sentence-boundary information used during pre-training and are cheap to
+    keep since they sit in the B-set (destinations only).
 
     Returns:
-        merge   - callable that reduces token count by r
-        unmerge - callable that restores original positions (no-op)
+        merge   - callable that reduces token count by r, CLS always at [0]
+        unmerge - callable that restores original positions (identity for
+                  classification; extend if you need token-level output)
     """
     B, T, _ = metric.shape
 
     with torch.no_grad():
         metric = metric / (metric.norm(dim=-1, keepdim=True) + 1e-6)
 
-        a, b = metric[..., ::2, :], metric[..., 1::2, :]
-        scores = a @ b.transpose(-1, -2)
+        # FIX 1: exclude CLS (index 0) from the matching entirely
+        body = metric[:, 1:, :]                         # (B, T-1, d)
 
-        node_max, node_idx = scores.max(dim=-1)
+        a = body[..., ::2, :]                           # even body tokens
+        b = body[..., 1::2, :]                          # odd body tokens
+        scores = a @ b.transpose(-1, -2)                # (B, |A|, |B|)
 
+        node_max, node_idx = scores.max(dim=-1)         # best B-match per A token
+
+        # FIX 3: protect SEP (last body token) from being a source.
+        # SEP is at body index T-2 (0-based); in the A-set if (T-2) is even.
+        sep_body_idx = T - 2                            # position in body
+        sep_a_idx    = sep_body_idx // 2               # position in A-set
         node_max = node_max.clone()
-        node_max[:, 0] = -float("inf")
+        if sep_body_idx % 2 == 0 and sep_a_idx < node_max.size(1):
+            node_max[:, sep_a_idx] = -float("inf")
 
         a_size = a.size(1)
         r = min(r, a_size - 1)
@@ -172,8 +217,20 @@ def bipartite_soft_matching(
         dst_idx = node_idx.gather(dim=-1, index=src_idx)
 
     def merge(x: Tensor, mode: str = "mean") -> Tensor:
-        """Merge r token pairs; returns a tensor with T - r tokens."""
-        src, dst = x[..., ::2, :], x[..., 1::2, :].clone()
+        """
+        Merge r token pairs; returns a tensor with T - r tokens.
+        CLS is always preserved at position 0.
+
+        mode: 'mean'  – average merged tokens (best for hidden states)
+              'amax'  – take the max (best for additive attention masks,
+                        where 0 = attend and -10000 = ignore)
+        """
+        # FIX 1: separate CLS so it is never touched by the matching
+        cls  = x[:, 0:1, :]                            # (B, 1, C)
+        body = x[:, 1:, :]                             # (B, T-1, C)
+
+        src = body[..., ::2, :]
+        dst = body[..., 1::2, :].clone()
         n, _, c = src.shape
         n_unm = unm_idx.size(-1)
 
@@ -181,6 +238,7 @@ def bipartite_soft_matching(
             dim=-2,
             index=src_idx.unsqueeze(-1).expand(n, r, c),
         )
+
         if mode == "mean":
             dst.scatter_reduce_(
                 -2,
@@ -189,13 +247,29 @@ def bipartite_soft_matching(
                 reduce="mean",
                 include_self=True,
             )
+        elif mode == "amax":
+            # Used for attention masks: real token (0) beats padding (-10000)
+            dst.scatter_reduce_(
+                -2,
+                dst_idx.unsqueeze(-1).expand(n, r, c),
+                matched_src,
+                reduce="amax",
+                include_self=True,
+            )
+        else:
+            raise ValueError(f"Unsupported merge mode: {mode!r}")
+
         unmerged = src.gather(
             dim=-2,
             index=unm_idx.unsqueeze(-1).expand(n, n_unm, c),
         )
-        return torch.cat([unmerged, dst], dim=1)
+
+        # FIX 1: CLS is always first in the output
+        return torch.cat([cls, unmerged, dst], dim=1)
 
     def unmerge(x: Tensor) -> Tensor:
+        # Identity for sequence-level classification (pooler uses CLS only).
+        # Extend this if you need token-level output (NER, QA, etc.).
         return x
 
     return merge, unmerge
