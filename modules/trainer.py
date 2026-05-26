@@ -12,7 +12,7 @@ from transformers import AutoTokenizer, BertModel
 
 from helpers import BenchmarkResult, count_params, peak_memory_mb
 from .BertClassifier import BertClassifier
-from .PaperDataset import DiskDataset, PaperDataset, pretokenize_to_disk
+from .PaperDataset import DualDiskDataset, pretokenize_dual_to_disk
 from .ToMeBertAttention import get_tome_timer_stats, reset_tome_timer
 from .preprocessing import PreprocessConfig, load_and_prepare_splits
 
@@ -34,13 +34,15 @@ def train_one_epoch(
     n_steps = len(loader)
 
     for step, batch in enumerate(loader):
-        ids = batch["input_ids"].to(device)
-        mask = batch["attention_mask"].to(device)
+        p_ids = batch["p_ids"].to(device)
+        p_mask = batch["p_mask"].to(device)
+        j_ids = batch["j_ids"].to(device)
+        j_mask = batch["j_mask"].to(device)
         labels = batch["labels"].to(device)
 
         if scaler is not None:
             with autocast(device_type=device.type):
-                logits = model(ids, mask)
+                logits = model(p_ids, p_mask, j_ids, j_mask)
                 loss = criterion(logits, labels) / accum_steps
             scaler.scale(loss).backward()
 
@@ -51,7 +53,7 @@ def train_one_epoch(
                 scaler.update()
                 optimizer.zero_grad()
         else:
-            logits = model(ids, mask)
+            logits = model(p_ids, p_mask, j_ids, j_mask)
             loss = criterion(logits, labels) / accum_steps
             loss.backward()
             if (step + 1) % accum_steps == 0:
@@ -98,16 +100,18 @@ def evaluate(model, loader, device) -> tuple[dict, float]:
 
     with torch.no_grad():
         for batch in loader:
-            ids = batch["input_ids"].to(device)
-            mask = batch["attention_mask"].to(device)
+            p_ids = batch["p_ids"].to(device)
+            p_mask = batch["p_mask"].to(device)
+            j_ids = batch["j_ids"].to(device)
+            j_mask = batch["j_mask"].to(device)
             labels = batch["labels"]
 
             t0 = time.perf_counter()
             if device.type == "cuda":
                 with autocast(device_type=device.type):
-                    logits = model(ids, mask)
+                    logits = model(p_ids, p_mask, j_ids, j_mask)
             else:
-                logits = model(ids, mask)
+                logits = model(p_ids, p_mask, j_ids, j_mask)
             latencies.append(time.perf_counter() - t0)
 
             all_logits.append(logits.float().cpu())
@@ -163,11 +167,10 @@ def run_benchmark(
         raise ValueError("journal_path is required because preprocessing always joins train with journal data")
 
     preprocess_config = PreprocessConfig(
-        text_combination=text_combination,
+        paper_cols=["Title", "Abstract", "Keywords"],
+        journal_cols=[journal_scope_col or "Aims", journal_category_col],
         label_col=label_col,
         journal_label_col=journal_label_col,
-        journal_category_col=journal_category_col,
-        journal_scope_col=journal_scope_col,
     )
 
     t_preprocess = time.perf_counter()
@@ -186,9 +189,9 @@ def run_benchmark(
     print(f"Text combination: {text_combination.upper()}")
     print(f"Classes: {prepared_data.num_labels}")
     print(
-        f"Train: {len(prepared_data.x_train)} | "
-        f"Val: {len(prepared_data.x_val)} | "
-        f"Test: {len(prepared_data.x_test)}"
+        f"Train: {len(prepared_data.p_train)} | "
+        f"Val: {len(prepared_data.p_val)} | "
+        f"Test: {len(prepared_data.p_test)}"
     )
 
     t_tokenize = time.perf_counter()
@@ -200,24 +203,27 @@ def run_benchmark(
     if use_disk_cache:
         os.makedirs(cache_dir, exist_ok=True)
         t_dataset = time.perf_counter()
-        input_ids_tr, attn_tr, labels_tr = pretokenize_to_disk(
-            prepared_data.x_train,
+        tr_data = pretokenize_dual_to_disk(
+            prepared_data.p_train,
+            prepared_data.j_train,
             prepared_data.y_train,
             tokenizer,
             max_length,
             cache_dir,
             "train",
         )
-        input_ids_va, attn_va, labels_va = pretokenize_to_disk(
-            prepared_data.x_val,
+        va_data = pretokenize_dual_to_disk(
+            prepared_data.p_val,
+            prepared_data.j_val,
             prepared_data.y_val,
             tokenizer,
             max_length,
             cache_dir,
             "val",
         )
-        input_ids_te, attn_te, labels_te = pretokenize_to_disk(
-            prepared_data.x_test,
+        te_data = pretokenize_dual_to_disk(
+            prepared_data.p_test,
+            prepared_data.j_test,
             prepared_data.y_test,
             tokenizer,
             max_length,
@@ -225,20 +231,17 @@ def run_benchmark(
             "test",
         )
 
-        train_ds = DiskDataset(input_ids_tr, attn_tr, labels_tr)
-        val_ds = DiskDataset(input_ids_va, attn_va, labels_va)
-        test_ds = DiskDataset(input_ids_te, attn_te, labels_te)
+        train_ds = DualDiskDataset(*tr_data)
+        val_ds = DualDiskDataset(*va_data)
+        test_ds = DualDiskDataset(*te_data)
         print(f"  [Created disk datasets]: {time.perf_counter() - t_dataset:.2f}s")
 
-        del prepared_data.x_train, prepared_data.x_val, prepared_data.x_test
+        del prepared_data.p_train, prepared_data.p_val, prepared_data.p_test
+        del prepared_data.j_train, prepared_data.j_val, prepared_data.j_test
         del prepared_data.y_train, prepared_data.y_val, prepared_data.y_test
         gc.collect()
     else:
-        t_dataset = time.perf_counter()
-        train_ds = PaperDataset(prepared_data.x_train, prepared_data.y_train, tokenizer, max_length)
-        val_ds = PaperDataset(prepared_data.x_val, prepared_data.y_val, tokenizer, max_length)
-        test_ds = PaperDataset(prepared_data.x_test, prepared_data.y_test, tokenizer, max_length)
-        print(f"  [Created datasets]: {time.perf_counter() - t_dataset:.2f}s")
+        raise NotImplementedError("Dynamic non-disk datasets are not supported in dual-branch mode.")
 
     t_loader = time.perf_counter()
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)

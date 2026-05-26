@@ -1,123 +1,54 @@
 import os
-
 import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-class PaperDataset(Dataset):
-    def __init__(self, texts, labels, tokenizer, max_length=256):
-        self.texts = texts
-        self.labels = labels
-        self.tokenizer = tokenizer
-        self.max_length = max_length
+def pretokenize_dual_to_disk(paper_texts, journal_texts, labels, tokenizer, max_length, save_dir, split_name):
+    os.makedirs(save_dir, exist_ok=True)
+    n = len(labels)
+    # Define paths
+    paths = {
+        key: os.path.join(save_dir, f"{split_name}_{key}.npy")
+        for key in ["p_ids", "p_mask", "j_ids", "j_mask", "labels"]
+    }
 
-    def __len__(self):
-        return len(self.labels)
+    if all(os.path.exists(p) for p in paths.values()):
+        print(f"  [Cache hit] Loading DUAL {split_name} from disk ...")
+        return (np.load(paths["p_ids"], mmap_mode="r"), np.load(paths["p_mask"], mmap_mode="r"),
+                np.load(paths["j_ids"], mmap_mode="r"), np.load(paths["j_mask"], mmap_mode="r"), np.load(paths["labels"]))
 
-    def __getitem__(self, idx):
-        encoding = self.tokenizer(
-            self.texts[idx],
-            padding="max_length",
-            truncation=True,
-            max_length=self.max_length,
-            return_tensors="pt",
-        )
+    print(f"  [Pre-tokenizing DUAL {split_name}: {n} samples] ...")
+    p_ids  = np.lib.format.open_memmap(paths["p_ids"], mode="w+", dtype=np.int32, shape=(n, max_length))
+    p_mask = np.lib.format.open_memmap(paths["p_mask"], mode="w+", dtype=np.int8, shape=(n, max_length))
+    j_ids  = np.lib.format.open_memmap(paths["j_ids"], mode="w+", dtype=np.int32, shape=(n, max_length))
+    j_mask = np.lib.format.open_memmap(paths["j_mask"], mode="w+", dtype=np.int8, shape=(n, max_length))
 
-        return {
-            "input_ids": encoding["input_ids"].squeeze(0),
-            "attention_mask": encoding["attention_mask"].squeeze(0),
-            "labels": torch.tensor(self.labels[idx], dtype=torch.long),
-        }
+    CHUNK = 2000
+    for start in range(0, n, CHUNK):
+        end = min(start + CHUNK, n)
+        cp = tokenizer(paper_texts[start:end], padding="max_length", truncation=True, max_length=max_length, return_tensors="np")
+        p_ids[start:end] = cp["input_ids"].astype(np.int32)
+        p_mask[start:end] = cp["attention_mask"].astype(np.int8)
 
+        cj = tokenizer(journal_texts[start:end], padding="max_length", truncation=True, max_length=max_length, return_tensors="np")
+        j_ids[start:end] = cj["input_ids"].astype(np.int32)
+        j_mask[start:end] = cj["attention_mask"].astype(np.int8)
 
-def pretokenize_to_disk(texts, labels, tokenizer, max_length, cache_dir, split_name):
-    """
-    Tokenize all texts once and save as memory-mapped numpy arrays.
-    This lets the DataLoader read directly from disk with minimal RAM usage.
-    """
-    os.makedirs(cache_dir, exist_ok=True)
-    n = len(texts)
+    np.save(paths["labels"], np.array(labels, dtype=np.int32))
+    return (np.load(paths["p_ids"], mmap_mode="r"), np.load(paths["p_mask"], mmap_mode="r"),
+            np.load(paths["j_ids"], mmap_mode="r"), np.load(paths["j_mask"], mmap_mode="r"), np.load(paths["labels"]))
 
-    input_ids_path = os.path.join(cache_dir, f"{split_name}_input_ids.npy")
-    attention_mask_path = os.path.join(cache_dir, f"{split_name}_attention_mask.npy")
-    labels_path = os.path.join(cache_dir, f"{split_name}_labels.npy")
+class DualDiskDataset(Dataset):
+    def __init__(self, p_ids, p_mask, j_ids, j_mask, labels):
+        self.p_ids, self.p_mask, self.j_ids, self.j_mask, self.labels = p_ids, p_mask, j_ids, j_mask, labels
 
-    kaggle_cache_dir = "/kaggle/input/datasets/khathih/tokenized-cache"
-    kaggle_input_ids_path = os.path.join(kaggle_cache_dir, f"{split_name}_input_ids.npy")
-    kaggle_attention_mask_path = os.path.join(kaggle_cache_dir, f"{split_name}_attention_mask.npy")
-    kaggle_labels_path = os.path.join(kaggle_cache_dir, f"{split_name}_labels.npy")
-
-    if (
-        os.path.exists(input_ids_path)
-        and os.path.exists(attention_mask_path)
-        and os.path.exists(labels_path)
-    ):
-        print(f"  [Cache hit] Loading pre-tokenized {split_name} from disk ...")
-        input_ids = np.load(input_ids_path, mmap_mode="r")
-        attention_mask = np.load(attention_mask_path, mmap_mode="r")
-        labels_arr = np.load(labels_path)
-        return input_ids, attention_mask, labels_arr
-
-    if (
-        os.path.exists(kaggle_input_ids_path)
-        and os.path.exists(kaggle_attention_mask_path)
-        and os.path.exists(kaggle_labels_path)
-    ):
-        print(f"  [Cache hit] Loading pre-tokenized {split_name} from Kaggle cache ...")
-        input_ids = np.load(kaggle_input_ids_path, mmap_mode="r")
-        attention_mask = np.load(kaggle_attention_mask_path, mmap_mode="r")
-        labels_arr = np.load(kaggle_labels_path)
-        return input_ids, attention_mask, labels_arr
-
-    print(f"  [Pre-tokenizing {split_name}: {n} samples] ...")
-    input_ids = np.lib.format.open_memmap(
-        input_ids_path, mode="w+", dtype=np.int32, shape=(n, max_length)
-    )
-    attention_mask = np.lib.format.open_memmap(
-        attention_mask_path, mode="w+", dtype=np.int8, shape=(n, max_length)
-    )
-
-    chunk_size = 2000
-    for start in range(0, n, chunk_size):
-        end = min(start + chunk_size, n)
-        chunk = tokenizer(
-            texts[start:end],
-            padding="max_length",
-            truncation=True,
-            max_length=max_length,
-            return_tensors="np",
-        )
-        input_ids[start:end] = chunk["input_ids"].astype(np.int32)
-        attention_mask[start:end] = chunk["attention_mask"].astype(np.int8)
-        if start % 50000 == 0:
-            print(f"    ... {end}/{n}")
-
-    np.save(labels_path, np.array(labels, dtype=np.int32))
-    print(f"  [Pre-tokenized {split_name} saved to {cache_dir}]")
-
-    input_ids = np.load(input_ids_path, mmap_mode="r")
-    attention_mask = np.load(attention_mask_path, mmap_mode="r")
-    labels_arr = np.load(labels_path)
-    return input_ids, attention_mask, labels_arr
-
-
-class DiskDataset(Dataset):
-    """
-    Reads tokenized data from memory-mapped numpy arrays.
-    Only the requested batch rows are loaded from disk.
-    """
-
-    def __init__(self, input_ids, attention_mask, labels):
-        self.input_ids = input_ids
-        self.attention_mask = attention_mask
-        self.labels = labels
-
-    def __len__(self):
-        return len(self.labels)
+    def __len__(self): return len(self.labels)
 
     def __getitem__(self, idx):
         return {
-            "input_ids": torch.tensor(self.input_ids[idx], dtype=torch.long),
-            "attention_mask": torch.tensor(self.attention_mask[idx], dtype=torch.long),
+            "p_ids": torch.tensor(self.p_ids[idx], dtype=torch.long),
+            "p_mask": torch.tensor(self.p_mask[idx], dtype=torch.long),
+            "j_ids": torch.tensor(self.j_ids[idx], dtype=torch.long),
+            "j_mask": torch.tensor(self.j_mask[idx], dtype=torch.long),
             "labels": torch.tensor(self.labels[idx], dtype=torch.long),
         }

@@ -7,7 +7,7 @@ from torch.amp import autocast
 from torch.utils.data import DataLoader
 
 from modules.BertClassifier import BertClassifier
-from modules.PaperDataset import DiskDataset
+from modules.PaperDataset import DualDiskDataset
 
 
 def compute_topk_accuracy(all_logits: torch.Tensor, all_labels: list[int], k: int) -> float:
@@ -31,16 +31,18 @@ def evaluate(model, loader, device, log_every: int = 50) -> tuple[dict, float]:
 
     with torch.no_grad():
         for batch_idx, batch in enumerate(loader, start=1):
-            ids = batch["input_ids"].to(device)
-            mask = batch["attention_mask"].to(device)
+            p_ids = batch["p_ids"].to(device)
+            p_mask = batch["p_mask"].to(device)
+            j_ids = batch["j_ids"].to(device)
+            j_mask = batch["j_mask"].to(device)
             labels = batch["labels"]
 
             t0 = time.perf_counter()
             if device.type == "cuda":
                 with autocast(device_type=device.type):
-                    logits = model(ids, mask)
+                    logits = model(p_ids, p_mask, j_ids, j_mask)
             else:
-                logits = model(ids, mask)
+                logits = model(p_ids, p_mask, j_ids, j_mask)
             latencies.append(time.perf_counter() - t0)
 
             all_logits.append(logits.float().cpu())
@@ -148,14 +150,16 @@ def build_model(
     return model
 
 
-def load_tokenized_split(cache_dir: str, split_name: str) -> DiskDataset:
-    input_ids_path = os.path.join(cache_dir, f"{split_name}_input_ids.npy")
-    attention_mask_path = os.path.join(cache_dir, f"{split_name}_attention_mask.npy")
+def load_tokenized_split(cache_dir: str, split_name: str) -> DualDiskDataset:
+    p_ids_path = os.path.join(cache_dir, f"{split_name}_p_ids.npy")
+    p_mask_path = os.path.join(cache_dir, f"{split_name}_p_mask.npy")
+    j_ids_path = os.path.join(cache_dir, f"{split_name}_j_ids.npy")
+    j_mask_path = os.path.join(cache_dir, f"{split_name}_j_mask.npy")
     labels_path = os.path.join(cache_dir, f"{split_name}_labels.npy")
 
     missing = [
         path
-        for path in [input_ids_path, attention_mask_path, labels_path]
+        for path in [p_ids_path, p_mask_path, j_ids_path, j_mask_path, labels_path]
         if not os.path.exists(path)
     ]
     if missing:
@@ -164,15 +168,17 @@ def load_tokenized_split(cache_dir: str, split_name: str) -> DiskDataset:
         )
 
     print(f"[Data] Loading tokenized split '{split_name}' from {cache_dir}")
-    input_ids = np.load(input_ids_path, mmap_mode="r")
-    attention_mask = np.load(attention_mask_path, mmap_mode="r")
+    p_ids = np.load(p_ids_path, mmap_mode="r")
+    p_mask = np.load(p_mask_path, mmap_mode="r")
+    j_ids = np.load(j_ids_path, mmap_mode="r")
+    j_mask = np.load(j_mask_path, mmap_mode="r")
     labels = np.load(labels_path)
     print(
-        f"[Data] input_ids shape={input_ids.shape}, "
-        f"attention_mask shape={attention_mask.shape}, "
+        f"[Data] p_ids shape={p_ids.shape}, "
+        f"p_mask shape={p_mask.shape}, "
         f"labels shape={labels.shape}"
     )
-    return DiskDataset(input_ids, attention_mask, labels)
+    return DualDiskDataset(p_ids, p_mask, j_ids, j_mask, labels)
 
 
 def run_inference(
